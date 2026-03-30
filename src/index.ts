@@ -6,6 +6,7 @@
 
 import { join } from "path";
 import { homedir } from "os";
+import { readdirSync, readFileSync, unlinkSync } from "fs";
 import { config } from "dotenv";
 import pino from "pino";
 
@@ -42,6 +43,26 @@ setInterval(() => {
       emitter.closeAndUnregister(t.agentId, t.sessionId);
     }
   }
+
+  // Check session files for dead Claude Code processes
+  const sessionsDir = join(homedir(), ".wire", "sessions");
+  try {
+    const files = readdirSync(sessionsDir).filter((f) => f.endsWith(".json"));
+    for (const file of files) {
+      try {
+        const data = JSON.parse(readFileSync(join(sessionsDir, file), "utf-8"));
+        if (data.ccPid) {
+          try { process.kill(data.ccPid, 0); } catch {
+            // Claude Code process is dead — disconnect and clean up
+            log.info({ event: "cc_dead", agentId: data.agentId, ccPid: data.ccPid, sessionId: data.sessionId }, "Claude Code dead, disconnecting");
+            store.disconnectSession(data.sessionId);
+            emitter.closeAndUnregister(data.agentId, data.sessionId);
+            unlinkSync(join(sessionsDir, file));
+          }
+        }
+      } catch {}
+    }
+  } catch {}
 
   const removed = store.cleanEphemeralAgents(ephemeralTtlMs);
   if (removed.length > 0) {
