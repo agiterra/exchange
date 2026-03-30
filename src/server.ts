@@ -288,7 +288,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       const err = requireOperator(c);
       if (err) return err;
     } else {
-      // New ephemeral agent — operator or authenticated agent
+      // New ephemeral agent — must be registered by an authenticated agent or operator
       const err = await requireAgentOrOperator(c);
       if (err) return err;
     }

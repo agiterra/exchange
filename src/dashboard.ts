@@ -9,16 +9,29 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     const statusColor = a.online ? "#4ade80" : "#6b7280";
     const planFull = a.plan ? esc(a.plan) : "";
     const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : "never";
-    const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 16) + "…" : "—";
+    const typeBadge = a.permanent
+      ? '<span class="badge badge-personai">personai</span>'
+      : '<span class="badge badge-ephemeral">ephemeral</span>';
+    const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + "…" : "—";
     return `
       <tr class="agent-row" onclick="this.classList.toggle('expanded')">
         <td><span style="color:${statusColor}">${status}</span></td>
-        <td class="agent-name copyable" onclick="event.stopPropagation();copy('${esc(a.id)}',this)" title="Click to copy">${esc(a.id)}</td>
-        <td>${esc(a.display_name)}</td>
-        <td class="copyable" onclick="event.stopPropagation();copy('${esc(a.pubkey)}',this)" title="Click to copy full pubkey">${pubkeyShort}</td>
-        <td>${a.sessions}</td>
+        <td class="agent-name">${esc(a.display_name)}</td>
+        <td class="badge-cell">${typeBadge}</td>
         <td class="plan"><span class="plan-text">${planFull || "—"}</span></td>
-        <td class="dim">${lastSeen}</td>
+      </tr>
+      <tr class="agent-detail">
+        <td></td>
+        <td colspan="3" class="detail-content">
+          <span class="detail-field">id:</span> <span class="copyable" onclick="copy('${esc(a.id)}',this)" title="Click to copy">${esc(a.id)}</span>
+          <span class="detail-sep">·</span>
+          <span class="detail-field">sessions:</span> ${a.sessions}
+          <span class="detail-sep">·</span>
+          <span class="detail-field">pubkey:</span> <span class="copyable" onclick="copy('${esc(a.pubkey)}',this)" title="Click to copy full key">${pubkeyShort}</span>
+          <span class="detail-sep">·</span>
+          <span class="detail-field">seen:</span> ${lastSeen}
+          <div class="detail-plan">${planFull || ""}</div>
+        </td>
       </tr>`;
   }).join("\n");
 
@@ -76,15 +89,17 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     .agent-row { cursor: pointer; }
     .agent-row:hover { background: #111; }
-    .agent-name { color: #60a5fa; font-weight: 500; }
+    .agent-name { color: #60a5fa; font-weight: 500; white-space: nowrap; }
+    .badge { font-size: 0.7em; padding: 1px 5px; border-radius: 3px; font-weight: 400; vertical-align: middle; }
+    .badge-personai { background: #1e3a5f; color: #60a5fa; }
+    .badge-ephemeral { background: #3f3f00; color: #facc15; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     col.col-status { width: 24px; }
-    col.col-id { width: 90px; }
-    col.col-name { width: 80px; }
-    col.col-pubkey { width: 120px; }
-    col.col-sessions { width: 70px; }
+    col.col-name { width: 150px; }
+    col.col-type { width: 80px; }
     col.col-plan { }
-    col.col-seen { width: 200px; }
+    .badge-cell { white-space: nowrap; }
+    td, th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     td:last-child { white-space: nowrap; }
     .plan { color: #a1a1aa; overflow: hidden; }
     .plan-text {
@@ -93,10 +108,22 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .agent-row.expanded .plan-text {
+    .agent-detail { display: none; }
+    .agent-row.expanded + .agent-detail { display: table-row; }
+    .detail-content {
+      padding: 4px 12px 12px 0;
+      color: #6b7280;
+      font-size: 0.85em;
+      white-space: normal;
+      border-bottom: 1px solid #1f1f1f;
+    }
+    .detail-field { color: #525252; }
+    .detail-sep { color: #333; margin: 0 4px; }
+    .detail-plan {
+      margin-top: 6px;
+      color: #a1a1aa;
       white-space: pre-wrap;
-      overflow: visible;
-      text-overflow: unset;
+      line-height: 1.4;
     }
     .dim { color: #525252; }
     .copyable { cursor: pointer; position: relative; }
@@ -299,22 +326,16 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   <table>
     <colgroup>
       <col class="col-status">
-      <col class="col-id">
       <col class="col-name">
-      <col class="col-pubkey">
-      <col class="col-sessions">
+      <col class="col-type">
       <col class="col-plan">
-      <col class="col-seen">
     </colgroup>
     <thead>
       <tr>
         <th></th>
-        <th>ID</th>
-        <th>Name</th>
-        <th>Pubkey</th>
-        <th>Sessions</th>
+        <th>Agent</th>
+        <th>Type</th>
         <th>Plan</th>
-        <th>Last Seen</th>
       </tr>
     </thead>
     <tbody>
@@ -379,25 +400,37 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const tbody = document.querySelector('tbody');
       const expandedIds = new Set();
       tbody.querySelectorAll('.agent-row.expanded').forEach(el => {
-        const name = el.querySelector('.agent-name');
-        if (name) expandedIds.add(name.textContent);
+        const id = el.getAttribute('data-agent');
+        if (id) expandedIds.add(id);
       });
       tbody.innerHTML = agents.map(a => {
         const status = a.online ? '●' : '○';
         const statusColor = a.online ? '#4ade80' : '#6b7280';
         const planFull = a.plan ? esc(a.plan) : '';
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : 'never';
-        const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 16) + '…' : '—';
+        const typeBadge = a.permanent
+          ? '<span class="badge badge-personai">personai</span>'
+          : '<span class="badge badge-ephemeral">ephemeral</span>';
+        const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + '…' : '—';
         const expanded = expandedIds.has(a.id) ? ' expanded' : '';
-        return '<tr class="agent-row' + expanded + '" onclick="this.classList.toggle(&quot;expanded&quot;)">' +
+        return '<tr class="agent-row' + expanded + '" data-agent="' + esc(a.id) + '" onclick="this.classList.toggle(&quot;expanded&quot;)">' +
           '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
-          '<td class="agent-name copyable" data-copy="' + esc(a.id) + '" title="Click to copy" onclick="event.stopPropagation()">' + esc(a.id) + '</td>' +
-          '<td>' + esc(a.display_name) + '</td>' +
-          '<td class="copyable" data-copy="' + esc(a.pubkey) + '" title="Click to copy full pubkey" onclick="event.stopPropagation()">' + pubkeyShort + '</td>' +
-          '<td>' + a.sessions + '</td>' +
+          '<td class="agent-name">' + esc(a.display_name) + '</td>' +
+          '<td class="badge-cell">' + typeBadge + '</td>' +
           '<td class="plan"><span class="plan-text">' + (planFull || '—') + '</span></td>' +
-          '<td class="dim">' + lastSeen + '</td>' +
-          '</tr>';
+          '</tr>' +
+          '<tr class="agent-detail">' +
+          '<td></td>' +
+          '<td colspan="3" class="detail-content">' +
+          '<span class="detail-field">id:</span> <span class="copyable" data-copy="' + esc(a.id) + '" onclick="event.stopPropagation()">' + esc(a.id) + '</span>' +
+          '<span class="detail-sep">·</span>' +
+          '<span class="detail-field">sessions:</span> ' + a.sessions +
+          '<span class="detail-sep">·</span>' +
+          '<span class="detail-field">pubkey:</span> <span class="copyable" data-copy="' + esc(a.pubkey) + '" onclick="event.stopPropagation()">' + pubkeyShort + '</span>' +
+          '<span class="detail-sep">·</span>' +
+          '<span class="detail-field">seen:</span> ' + lastSeen +
+          '<div class="detail-plan">' + (planFull || '') + '</div>' +
+          '</td></tr>';
       }).join('');
 
       // Re-bind click handlers via delegation

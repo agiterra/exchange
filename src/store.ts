@@ -260,7 +260,7 @@ export class Store {
 
   getMessagesForAgent(agentId: string, sinceSeq: number, limit = 100): Message[] {
     return this.db.prepare(
-      "SELECT * FROM messages WHERE seq > ? AND (dest IS NULL OR dest = ?) ORDER BY seq ASC LIMIT ?"
+      "SELECT * FROM messages WHERE seq > ? AND dest = ? ORDER BY seq ASC LIMIT ?"
     ).all(sinceSeq, agentId, limit) as Message[];
   }
 
