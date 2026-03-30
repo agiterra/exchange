@@ -23,7 +23,7 @@ const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
 const staleMs = parseInt(process.env.STALE_MS ?? "15000", 10);
 const disconnectMs = parseInt(process.env.DISCONNECT_MS ?? "60000", 10);
 const reconcilerIntervalMs = parseInt(process.env.RECONCILER_INTERVAL_MS ?? "10000", 10);
-const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "3600000", 10); // 1 hour default
+const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "60000", 10); // 1 minute default
 
 export const log = pino({ name: "wire" });
 
