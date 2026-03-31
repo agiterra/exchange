@@ -74,10 +74,12 @@ CREATE TABLE IF NOT EXISTS webhooks (
     plugin      TEXT NOT NULL,
     validator   TEXT,
     secrets_map TEXT,
-    created_at  INTEGER NOT NULL,
-    UNIQUE(agent_id, plugin)
+    filter      TEXT,
+    meta        TEXT,
+    created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_webhooks_agent ON webhooks(agent_id);
+CREATE INDEX IF NOT EXISTS idx_webhooks_plugin ON webhooks(agent_id, plugin);
 
 CREATE TABLE IF NOT EXISTS operators (
     id              TEXT PRIMARY KEY,
@@ -164,6 +166,8 @@ export type Webhook = {
   plugin: string;
   validator: string | null;
   secrets_map: string | null;
+  filter: string | null;
+  meta: string | null;
   created_at: number;
 };
 
@@ -213,6 +217,18 @@ export class Store {
     if (!msgCols.some((c) => c.name === "source_cc_session")) {
       this.db.exec("ALTER TABLE messages ADD COLUMN source_cc_session TEXT");
     }
+
+    // Add filter + meta columns to webhooks (channel plugin infrastructure)
+    const whCols = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    if (!whCols.some((c) => c.name === "filter")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN filter TEXT");
+    }
+    if (!whCols.some((c) => c.name === "meta")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN meta TEXT");
+    }
+    // Drop old unique constraint by rebuilding table if it exists
+    // (SQLite can't drop constraints, but the CREATE TABLE IF NOT EXISTS
+    // already has the correct schema without UNIQUE for new databases)
   }
 
   // --- Messages ---
@@ -442,14 +458,65 @@ export class Store {
     ).get(agentId, plugin) as Webhook) ?? null;
   }
 
+  getWebhookById(id: number): Webhook | null {
+    return (this.db.prepare("SELECT * FROM webhooks WHERE id = ?").get(id) as Webhook) ?? null;
+  }
+
+  getWebhooksForAgent(agentId: string, plugin?: string): Webhook[] {
+    if (plugin) {
+      return this.db.prepare(
+        "SELECT * FROM webhooks WHERE agent_id = ? AND plugin = ?"
+      ).all(agentId, plugin) as Webhook[];
+    }
+    return this.db.prepare(
+      "SELECT * FROM webhooks WHERE agent_id = ?"
+    ).all(agentId) as Webhook[];
+  }
+
+  getAllWebhooksForPlugin(plugin: string): Webhook[] {
+    return this.db.prepare(
+      "SELECT * FROM webhooks WHERE plugin = ?"
+    ).all(plugin) as Webhook[];
+  }
+
+  createWebhook(opts: {
+    agentId: string;
+    plugin: string;
+    validator?: string;
+    secretsMap?: string;
+    filter?: string;
+    meta?: string;
+  }): number {
+    const now = Date.now();
+    const result = this.db.prepare(`
+      INSERT INTO webhooks (agent_id, plugin, validator, secrets_map, filter, meta, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      opts.agentId, opts.plugin,
+      opts.validator ?? null, opts.secretsMap ?? null,
+      opts.filter ?? null, opts.meta ?? null, now,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  deleteWebhook(id: number): void {
+    this.db.prepare("DELETE FROM webhooks WHERE id = ?").run(id);
+  }
+
+  deleteWebhooksForAgent(agentId: string, plugin?: string): void {
+    if (plugin) {
+      this.db.prepare("DELETE FROM webhooks WHERE agent_id = ? AND plugin = ?").run(agentId, plugin);
+    } else {
+      this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(agentId);
+    }
+  }
+
+  /** @deprecated Use createWebhook instead */
   upsertWebhook(agentId: string, plugin: string, validator?: string, secretsMap?: string): void {
     const now = Date.now();
     this.db.prepare(`
       INSERT INTO webhooks (agent_id, plugin, validator, secrets_map, created_at)
       VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(agent_id, plugin) DO UPDATE SET
-        validator = excluded.validator,
-        secrets_map = excluded.secrets_map
     `).run(agentId, plugin, validator ?? null, secretsMap ?? null, now);
   }
 

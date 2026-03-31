@@ -33,6 +33,8 @@ import {
   generateAuthenticationOptions,
 } from "./auth.js";
 import type { Logger } from "pino";
+import { validateGitHub, validateSlack } from "./hmac.js";
+import { evaluateFilter, validateFilter } from "./filter.js";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
 import { dirname } from "path";
 import { fileURLToPath } from "url";
@@ -481,28 +483,59 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   app.post("/agents/:id/webhooks", async (c) => {
     const agentId = c.req.param("id");
 
-    // Agent can only register webhooks for itself
-    const err = await requireAgent(c, agentId);
+    // Authenticated agent or operator can register webhooks
+    const err = await requireAgentOrOperator(c);
     if (err) return err;
 
     const body = await c.req.json();
-    const { plugin, validator, secrets } = body;
+    const { plugin, validator, webhook_secret, filter: filterExpr, meta } = body;
 
     if (!plugin) {
       return c.json({ error: "missing plugin" }, 400);
     }
 
-    store.upsertWebhook(
+    // Validate filter expression if provided
+    if (filterExpr) {
+      const filterErr = validateFilter(filterExpr);
+      if (filterErr) {
+        return c.json({ error: `invalid filter: ${filterErr}` }, 400);
+      }
+    }
+
+    const secretsMap = webhook_secret
+      ? JSON.stringify({ webhook_secret })
+      : body.secrets ? JSON.stringify(body.secrets) : undefined;
+
+    const webhookId = store.createWebhook({
       agentId,
       plugin,
-      validator,
-      secrets ? JSON.stringify(secrets) : undefined,
-    );
+      validator: validator ?? (webhook_secret ? "hmac" : "jwt-default"),
+      secretsMap,
+      filter: filterExpr,
+      meta: meta ? JSON.stringify(meta) : undefined,
+    });
 
     return c.json({
+      webhook_id: webhookId,
       url: `/webhooks/${agentId}/${plugin}`,
       registered: true,
     });
+  });
+
+  app.delete("/agents/:id/webhooks/:webhookId", async (c) => {
+    const agentId = c.req.param("id");
+    const webhookId = parseInt(c.req.param("webhookId"), 10);
+
+    const err = await requireAgentOrOperator(c);
+    if (err) return err;
+
+    const webhook = store.getWebhookById(webhookId);
+    if (!webhook || webhook.agent_id !== agentId) {
+      return c.json({ error: "webhook not found" }, 404);
+    }
+
+    store.deleteWebhook(webhookId);
+    return c.json({ deleted: webhookId });
   });
 
   // --- Inbound Webhook ---
@@ -515,32 +548,82 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((v, k) => { headers[k] = v; });
 
-    // Default JWT validator — verifies sender identity
-    let verified: JwtValidatorResult;
-    try {
-      verified = await verifyJwtSender(headers, rawBody, store);
-    } catch (e) {
-      return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
-    }
+    // Look up webhook registration
+    const webhooks = store.getWebhooksForAgent(agentId, plugin);
+    const webhook = webhooks[0]; // first match
 
-    // Parse body
+    let source = agentId;
+    let topic = `webhook.${plugin}`;
     let parsedBody: unknown;
     try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = rawBody; }
 
-    // Envelope: routing metadata at top level, original body as payload
+    if (webhook) {
+      const secrets = webhook.secrets_map ? JSON.parse(webhook.secrets_map) : {};
+      const validatorType = webhook.validator ?? "jwt-default";
+
+      // Validate based on type
+      if (validatorType === "hmac" || validatorType === "github") {
+        const sig = headers["x-hub-signature-256"] ?? "";
+        if (!sig || !await validateGitHub(secrets.webhook_secret, rawBody, sig)) {
+          return c.json({ error: "invalid GitHub signature" }, 401);
+        }
+        source = "github";
+        topic = `webhook.github`;
+      } else if (validatorType === "slack") {
+        const sig = headers["x-slack-signature"] ?? "";
+        const ts = headers["x-slack-request-timestamp"] ?? "";
+        if (!await validateSlack(secrets.webhook_secret ?? secrets.signing_secret, rawBody, sig, ts)) {
+          return c.json({ error: "invalid Slack signature" }, 401);
+        }
+        // Handle Slack URL verification challenge
+        if (typeof parsedBody === "object" && parsedBody !== null && (parsedBody as any).type === "url_verification") {
+          return c.json({ challenge: (parsedBody as any).challenge });
+        }
+        source = "slack";
+        topic = `webhook.slack`;
+      } else {
+        // JWT default validator
+        try {
+          const verified = await verifyJwtSender(headers, rawBody, store);
+          source = verified.source;
+          topic = verified.topic;
+        } catch (e) {
+          return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
+        }
+      }
+
+      // Apply filter
+      if (webhook.filter) {
+        const event = headers["x-github-event"] ?? headers["x-slack-event"] ?? "";
+        if (!evaluateFilter(webhook.filter, { event, payload: parsedBody })) {
+          return c.json({ filtered: true, delivered: false });
+        }
+      }
+    } else {
+      // No webhook registration — fall back to JWT validation
+      try {
+        const verified = await verifyJwtSender(headers, rawBody, store);
+        source = verified.source;
+        topic = verified.topic;
+      } catch (e) {
+        return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
+      }
+    }
+
+    // Build envelope and route
     const payload = {
-      from: verified.source,
-      from_name: verified.sender_display_name,
-      topic: verified.topic,
+      source,
+      topic,
       dest: agentId,
       plugin,
+      event: headers["x-github-event"] ?? undefined,
       payload: parsedBody,
     };
 
     const { message, deliveries } = router.route({
-      source: verified.source,
+      source,
       dest: agentId,
-      topic: verified.topic,
+      topic,
       payload: JSON.stringify(payload),
       raw: rawBody,
     });
