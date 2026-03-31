@@ -33,7 +33,6 @@ import {
   generateAuthenticationOptions,
 } from "./auth.js";
 import type { Logger } from "pino";
-import { validateGitHub, validateSlack } from "./hmac.js";
 import { evaluateFilter, validateFilter } from "./filter.js";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
 import { dirname } from "path";
@@ -559,30 +558,32 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
     if (webhook) {
       const secrets = webhook.secrets_map ? JSON.parse(webhook.secrets_map) : {};
-      const validatorType = webhook.validator ?? "jwt-default";
+      const validatorCode = webhook.validator;
 
-      // Validate based on type
-      if (validatorType === "hmac" || validatorType === "github") {
-        const sig = headers["x-hub-signature-256"] ?? "";
-        if (!sig || !await validateGitHub(secrets.webhook_secret, rawBody, sig)) {
-          return c.json({ error: "invalid GitHub signature" }, 401);
+      if (validatorCode && validatorCode !== "jwt-default") {
+        // Run client-provided validator in VM sandbox
+        try {
+          const agents = store.getAllAgents();
+          const directory: Record<string, { pubkey: string; display_name: string }> = {};
+          for (const a of agents) directory[a.id] = { pubkey: a.pubkey, display_name: a.display_name };
+
+          const result = await runValidator(validatorCode, {
+            headers, body: rawBody, secrets, directory,
+          });
+          if (!result) {
+            return c.json({ error: "webhook validation failed" }, 401);
+          }
+          // Validator can return { source, topic } to override routing
+          if (typeof result === "object" && result !== null) {
+            const r = result as Record<string, unknown>;
+            if (r.source) source = String(r.source);
+            if (r.topic) topic = String(r.topic);
+          }
+        } catch (e) {
+          return c.json({ error: "validator error", detail: String(e) }, 401);
         }
-        source = "github";
-        topic = `webhook.github`;
-      } else if (validatorType === "slack") {
-        const sig = headers["x-slack-signature"] ?? "";
-        const ts = headers["x-slack-request-timestamp"] ?? "";
-        if (!await validateSlack(secrets.webhook_secret ?? secrets.signing_secret, rawBody, sig, ts)) {
-          return c.json({ error: "invalid Slack signature" }, 401);
-        }
-        // Handle Slack URL verification challenge
-        if (typeof parsedBody === "object" && parsedBody !== null && (parsedBody as any).type === "url_verification") {
-          return c.json({ challenge: (parsedBody as any).challenge });
-        }
-        source = "slack";
-        topic = `webhook.slack`;
       } else {
-        // JWT default validator
+        // Default JWT validator
         try {
           const verified = await verifyJwtSender(headers, rawBody, store);
           source = verified.source;
@@ -594,8 +595,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
       // Apply filter
       if (webhook.filter) {
-        const event = headers["x-github-event"] ?? headers["x-slack-event"] ?? "";
-        if (!evaluateFilter(webhook.filter, { event, payload: parsedBody })) {
+        if (!evaluateFilter(webhook.filter, { headers, event: headers["x-github-event"] ?? "", payload: parsedBody })) {
           return c.json({ filtered: true, delivered: false });
         }
       }
