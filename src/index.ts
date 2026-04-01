@@ -64,6 +64,37 @@ setInterval(() => {
     }
   } catch {}
 
+  // Before reaping ephemeral agents, collect their webhooks for external cleanup
+  const candidates = store.getEphemeralCandidates(ephemeralTtlMs);
+  for (const agentId of candidates) {
+    const webhooks = store.getWebhooksForAgent(agentId);
+    for (const wh of webhooks) {
+      if (wh.meta) {
+        try {
+          const meta = JSON.parse(wh.meta);
+          if (meta.hook_id && meta.repo) {
+            // Delete GitHub webhook
+            const ghToken = process.env.GITHUB_TOKEN;
+            if (ghToken) {
+              fetch(`https://api.github.com/repos/${meta.repo}/hooks/${meta.hook_id}`, {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${ghToken}`, "User-Agent": "wire-server" },
+              }).then((res) => {
+                if (res.ok || res.status === 404) {
+                  log.info({ event: "github_hook_deleted", repo: meta.repo, hookId: meta.hook_id, agent: agentId }, "GitHub webhook deleted");
+                } else {
+                  log.error({ event: "github_hook_delete_failed", repo: meta.repo, hookId: meta.hook_id, status: res.status }, "GitHub webhook delete failed");
+                }
+              }).catch((e) => {
+                log.error({ event: "github_hook_delete_error", repo: meta.repo, hookId: meta.hook_id, err: e }, "GitHub webhook delete error");
+              });
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+
   const removed = store.cleanEphemeralAgents(ephemeralTtlMs);
   if (removed.length > 0) {
     log.info({ event: "ephemeral_cleanup", agents: removed }, `removed ${removed.length} ephemeral agent(s)`);

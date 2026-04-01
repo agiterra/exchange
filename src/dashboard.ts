@@ -485,13 +485,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       entry.appendChild(summary);
       entry.appendChild(detail);
 
-      log.appendChild(entry);
-      log.scrollTop = log.scrollHeight;
+      log.prepend(entry);
       msgCount++;
       document.getElementById('msg-log-count').textContent = '(' + msgCount + ')';
 
       // Cap at 200 entries
-      while (log.children.length > 200) { log.removeChild(log.firstChild); msgCount--; }
+      while (log.children.length > 200) { log.removeChild(log.lastChild); msgCount--; }
     }
 
     // SSE live messages
@@ -501,7 +500,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
     // Backfill recent messages via REST
     fetch('/messages/recent?limit=50').then(r => r.json()).then(messages => {
-      for (const msg of messages) addMessageEntry(msg);
+      // Reverse so newest ends up on top after prepend
+      for (const msg of messages.reverse()) addMessageEntry(msg);
     }).catch(() => {});
 
     function esc(s) {

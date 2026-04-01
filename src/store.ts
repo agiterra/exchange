@@ -542,10 +542,12 @@ export class Store {
    * Clean up ephemeral agents: not permanent, no active sessions,
    * and not seen within the TTL window.
    */
-  cleanEphemeralAgents(ttlMs: number): string[] {
+  /**
+   * Get ephemeral agent IDs that are candidates for reaping (without deleting).
+   */
+  getEphemeralCandidates(ttlMs: number): string[] {
     const cutoff = Date.now() - ttlMs;
-
-    const candidates = this.db.prepare(`
+    return (this.db.prepare(`
       SELECT a.id FROM agents a
       WHERE a.permanent = 0
         AND NOT EXISTS (
@@ -553,17 +555,19 @@ export class Store {
           WHERE s.agent_id = a.id AND s.disconnected_at IS NULL
         )
         AND (a.last_seen_at IS NULL OR a.last_seen_at < ?)
-    `).all(cutoff) as { id: string }[];
+    `).all(cutoff) as { id: string }[]).map((r) => r.id);
+  }
 
-    const removed: string[] = [];
-    for (const { id } of candidates) {
+  cleanEphemeralAgents(ttlMs: number): string[] {
+    const candidates = this.getEphemeralCandidates(ttlMs);
+
+    for (const id of candidates) {
       this.db.prepare("DELETE FROM subscriptions WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
-      removed.push(id);
     }
-    return removed;
+    return candidates;
   }
 
   // --- Operators ---

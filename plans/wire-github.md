@@ -50,12 +50,13 @@ HOOK_ID=$(gh api repos/fabrica-land/soil-app/hooks --method POST \
   -f[] events=pull_request \
   --jq '.id')
 
-# Register on Wire (stores secret + hook ID for cleanup)
+# Register on Wire (validator code + secret + hook ID for cleanup)
 curl -X POST https://the-wire.ngrok.io/agents/waffles/webhooks \
   -H "Content-Type: application/json" \
   -d '{
-    "type": "github",
+    "plugin": "github",
     "webhook_secret": "'$SECRET'",
+    "validator": "const sig = headers[\"x-hub-signature-256\"]; if (!sig) return false; const mac = crypto.createHmac(\"sha256\", secrets.webhook_secret); const digest = await mac.update(body).digest(\"hex\"); if (sig !== \"sha256=\" + digest) return false; return { source: \"github\", topic: \"webhook.github\" };",
     "filter": "payload.pull_request?.number === 42",
     "meta": { "repo": "fabrica-land/soil-app", "hook_id": '$HOOK_ID' }
   }'
@@ -65,14 +66,24 @@ curl -X POST https://the-wire.ngrok.io/agents/waffles/webhooks \
 5. When PR merges, ED can deregister webhook without stopping agent
 6. When agent dies/is reaped, Wire cleans up GitHub webhooks automatically
 
-### Validation (GitHub HMAC-SHA256)
+### Validation (VM Code)
 
-Built-in `github` validator type:
+The validator is client-provided JS code run in the Wire's VM sandbox.
+The sandbox provides `headers`, `body`, `secrets`, `crypto` (with
+`createHmac`, `verifyEd25519`), `directory`, and `rawBody`.
 
-1. Extract `X-Hub-Signature-256` header
-2. HMAC-SHA256 the raw body with the agent's stored `webhook_secret`
-3. Compare `sha256={hmac_hex}` against the header
-4. Extract `X-GitHub-Event` header as `event`
+GitHub HMAC-SHA256 validator:
+```js
+const sig = headers["x-hub-signature-256"];
+if (!sig) return false;
+const mac = crypto.createHmac("sha256", secrets.webhook_secret);
+const digest = await mac.update(body).digest("hex");
+if (sig !== "sha256=" + digest) return false;
+return { source: "github", topic: "webhook.github" };
+```
+
+The Wire server has no GitHub-specific code. The validator is registered
+by the ED at webhook setup time.
 
 ### Filter Evaluation
 
@@ -133,20 +144,23 @@ single-webhook-per-repo fan-out architecture.
 
 ## Implementation
 
-### Wire Server Changes
+### Already Shipped (wire v0.8.1)
 
-1. **GitHub validator**: built-in HMAC-SHA256 with `X-Hub-Signature-256`
-2. **Webhook table**: extend with `meta` JSON column (repo, hook_id)
-3. **Filter VM sandbox**: evaluate JS expression with `{ event, payload }`
-4. **Webhook CRUD**: POST/DELETE for agent webhook registrations
-5. **Cleanup on reap**: hook into ephemeral agent cleanup + agent_stop
-6. **GitHub hook deletion**: call `gh api` or GitHub REST API to delete hooks
+- VM validator sandbox (runValidator) — client-provided async JS code
+- Filter VM sandbox (evaluateFilter) — JS expression evaluation
+- Webhook CRUD with filter + meta columns
+- HMAC helpers (hmac.ts) — available as reference for validator code
 
-### Shared with wire-slack
+### Remaining Work
 
-- Webhook validation (HMAC-SHA256 — same algo, different header names)
-- Filter VM sandbox
-- Webhook registration API
+1. **Cleanup on reap**: when ephemeral agent is reaped, read `meta.hook_id`
+   and `meta.repo` from webhook registration, call GitHub API to delete hook
+2. **GitHub hook deletion**: `DELETE https://api.github.com/repos/{repo}/hooks/{hook_id}`
+   using `GITHUB_TOKEN` from `~/.wire/.env`
+3. **Webhook DELETE endpoint**: already exists (`DELETE /agents/:id/webhooks/:webhookId`),
+   extend to trigger GitHub hook cleanup when meta contains hook_id
+4. **Standard validator snippet**: document the GitHub HMAC validator code
+   so agents/EDs can copy-paste it at registration time
 
 ## Testing
 
