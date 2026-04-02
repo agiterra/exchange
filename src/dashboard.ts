@@ -321,7 +321,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   </table>
 
   <div class="form-section">
-    <div class="msg-log-header" id="msg-log-header" onclick="this.classList.toggle('expanded')">
+    <div class="msg-log-header expanded" id="msg-log-header" onclick="this.classList.toggle('expanded')">
       <span class="msg-log-toggle">▶</span>
       <h2>Message Log</h2>
       <span class="msg-log-count" id="msg-log-count"></span>
@@ -477,10 +477,10 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       addMessageEntry(JSON.parse(e.data));
     });
 
-    // Backfill recent messages via REST
+    // Backfill recent messages via REST (API returns oldest-first)
     fetch('/messages/recent?limit=50').then(r => r.json()).then(messages => {
-      // Reverse so newest ends up on top after prepend
-      for (const msg of messages.reverse()) addMessageEntry(msg);
+      // Iterate oldest-first so each prepend pushes older entries down
+      for (const msg of messages) addMessageEntry(msg);
     }).catch(() => {});
 
     function esc(s) {
