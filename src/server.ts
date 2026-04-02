@@ -12,13 +12,18 @@
  *   POST /agents/:id/sessions/:sid/heartbeat — session keepalive
  *   GET  /agents/:id/plan                — get agent plan
  *   PUT  /agents/:id/plan                — set agent plan
+ *   GET  /agents/:id/peek                — read agent's screen output (operator only)
+ *   POST /agents/:id/message             — send IPC message to agent (operator only)
  *   POST /agents/:id/webhooks            — register webhook for agent
  *   POST /webhooks/:agent/:plugin        — inbound webhook delivery
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
-import { watchFile } from "fs";
+import { watchFile, existsSync } from "fs";
 import { join } from "path";
+import { execSync } from "child_process";
+import { tmpdir } from "os";
+import Database from "bun:sqlite";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Context } from "hono";
@@ -295,11 +300,15 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     }
 
     const existing = store.getAgent(id);
+    const reaped = !existing ? store.getReapedAgent(id) : null;
+    let authPath: string;
     if (existing && existing.permanent) {
+      authPath = "permanent-reregister";
       // Permanent agent re-registering — must prove identity
       const err = await requireAgent(c, id);
       if (err) return err;
     } else if (existing && !existing.permanent) {
+      authPath = "ephemeral-reregister";
       // Ephemeral agent re-registering — allow the agent itself or any sponsoring agent
       const selfErr = await requireAgent(c, id);
       if (selfErr) {
@@ -307,12 +316,13 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
         if (sponsorErr) return sponsorErr;
       }
     } else if (permanent) {
+      authPath = "new-permanent";
       // New permanent agent — operator only
       const err = requireOperator(c);
       if (err) return err;
     } else {
+      authPath = reaped ? "reaped-readmission" : "new-ephemeral";
       // New ephemeral agent — check for a reaped agent with matching pubkey (re-admission)
-      const reaped = store.getReapedAgent(id);
       if (reaped && reaped.pubkey === pubkey) {
         // Same agent, same key — let them back in
       } else {
@@ -321,6 +331,16 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
         if (err) return err;
       }
     }
+
+    log.info({
+      event: "register",
+      agentId: id,
+      authPath,
+      bodyPermanent: permanent,
+      existingPermanent: existing?.permanent ?? null,
+      reaped: !!reaped,
+      pubkeyMatch: existing ? existing.pubkey === pubkey : null,
+    }, `REGISTER ${id} via ${authPath}`);
 
     store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent });
 
@@ -516,6 +536,84 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     const body = await c.req.json();
     store.setAgentPlan(agentId, body.plan ?? "");
     return c.json({ agent_id: agentId, updated: true });
+  });
+
+  // --- Agent Peek (operator reads screen output) ---
+
+  app.get("/agents/:id/peek", async (c) => {
+    const err = requireOperator(c);
+    if (err) return err;
+
+    const agentId = c.req.param("id");
+    const crewDb = join(process.env.HOME ?? "/tmp", ".wire", "crews.db");
+    if (!existsSync(crewDb)) {
+      return c.json({ error: "crew database not found at " + crewDb }, 500);
+    }
+
+    const db = new Database(crewDb, { readonly: true });
+    try {
+      const row = db.query("SELECT screen_name FROM agents WHERE id = ?").get(agentId) as { screen_name: string } | null;
+      if (!row) {
+        return c.json({ error: `agent '${agentId}' not found in crew database` }, 404);
+      }
+
+      const tmpFile = join(tmpdir(), `wire-peek-${agentId}-${Date.now()}.txt`);
+      try {
+        execSync(`/opt/homebrew/bin/screen -S ${row.screen_name} -X hardcopy ${tmpFile}`, { timeout: 5000 });
+        const output = Bun.file(tmpFile);
+        const text = await output.text();
+        execSync(`rm -f ${tmpFile}`);
+        return c.json({ agent_id: agentId, screen_name: row.screen_name, output: text.trimEnd() });
+      } catch (e: any) {
+        return c.json({
+          error: `failed to read screen for '${agentId}' (screen: ${row.screen_name})`,
+          detail: e.message,
+          stderr: e.stderr?.toString(),
+        }, 500);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Agent Send Message (operator sends IPC to agent) ---
+
+  app.post("/agents/:id/message", async (c) => {
+    const err = requireOperator(c);
+    if (err) return err;
+
+    const agentId = c.req.param("id");
+    const agent = store.getAgent(agentId);
+    if (!agent) {
+      return c.json({ error: `agent '${agentId}' not registered` }, 404);
+    }
+
+    const body = await c.req.json();
+    const text = body.message || body.text;
+    if (!text) {
+      return c.json({ error: "missing 'message' field" }, 400);
+    }
+
+    const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
+    const operator = operatorId ? store.getOperator(operatorId) : null;
+    const operatorName = operator?.display_name ?? "operator";
+    const payload = JSON.stringify({
+      type: "operator-message",
+      from: operatorName,
+      message: text,
+    });
+
+    const { message, deliveries } = router.route({
+      source: operatorName,
+      dest: agentId,
+      topic: "ipc",
+      payload,
+    });
+
+    return c.json({
+      seq: message.seq,
+      delivered_to: deliveries,
+    });
   });
 
   // --- Webhook Registration ---
@@ -935,6 +1033,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   const server = Bun.serve({
     port,
     fetch: app.fetch,
+    idleTimeout: 255, // seconds; default 12s kills SSE connections
   });
 
   return server;
