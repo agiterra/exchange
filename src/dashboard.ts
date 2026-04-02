@@ -223,20 +223,22 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     .msg-entry:last-child { border-bottom: none; }
     .msg-summary {
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
       overflow: hidden;
+      white-space: nowrap;
     }
-    .msg-text { color: #d4d4d4; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .msg-meta { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: #525252; margin-top: 1px; }
-    .msg-entry:not(.expanded) .msg-meta { display: none; }
-    .msg-ts { color: #525252; min-width: 80px; flex-shrink: 0; }
-    .msg-seq { color: #6b7280; min-width: 40px; flex-shrink: 0; }
-    .msg-source { color: #60a5fa; flex-shrink: 0; }
+    .msg-ts { color: #525252; font-size: 11px; min-width: 80px; flex-shrink: 0; }
+    .msg-seq { color: #6b7280; font-size: 11px; min-width: 40px; flex-shrink: 0; }
+    .msg-source { color: #60a5fa; min-width: 80px; flex-shrink: 0; }
     .msg-arrow { color: #3f3f46; flex-shrink: 0; }
-    .msg-dest { color: #a78bfa; flex-shrink: 0; }
+    .msg-dest { color: #a78bfa; min-width: 80px; flex-shrink: 0; }
     .msg-topic { color: #fbbf24; flex-shrink: 0; }
     .msg-delivery { font-size: 11px; flex-shrink: 0; }
     .msg-delivery .ok { color: #4ade80; }
     .msg-delivery .skip { color: #f87171; }
+    .msg-snippet { color: #3f3f46; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .msg-detail {
       display: none;
       margin: 4px 0 4px 92px;
@@ -435,27 +437,24 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
       const summary = document.createElement('div');
       summary.className = 'msg-summary';
-      // Extract readable text: try parsed.text, then parsed.content, then snippet
-      let msgText = '';
+      // Prefer .text or .detail over raw stringified payload
+      let displaySnippet = shortSnippet;
       if (parsed && typeof parsed === 'object') {
-        msgText = parsed.text || parsed.content || parsed.message || parsed.body || '';
-        if (typeof msgText === 'object') msgText = '';
+        const readable = parsed.text ?? parsed.detail;
+        if (typeof readable === 'string' && readable) {
+          displaySnippet = readable.length > 80 ? readable.slice(0, 80) + '\u2026' : readable;
+        }
       }
-      if (!msgText && typeof parsed === 'string') msgText = parsed;
-      if (!msgText) msgText = shortSnippet;
-      const shortText = msgText.length > 120 ? msgText.slice(0, 120) + '\u2026' : msgText;
 
       summary.innerHTML =
-        '<span class="msg-text">' + esc(shortText) + '</span>' +
-        '<span class="msg-meta">' +
-          '<span class="msg-ts">' + ts + '</span>' +
-          '<span class="msg-seq">#' + msg.seq + '</span>' +
-          '<span class="msg-source">' + esc(msg.source || '') + '</span>' +
-          '<span class="msg-arrow">\u2192</span>' +
-          '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
-          '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
-          '<span class="msg-delivery">' + deliveryBadges + '</span>' +
-        '</span>';
+        '<span class="msg-ts">' + ts + '</span>' +
+        '<span class="msg-seq">#' + msg.seq + '</span>' +
+        '<span class="msg-source">' + esc(msg.source || '') + '</span>' +
+        '<span class="msg-arrow">\u2192</span>' +
+        '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
+        '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
+        '<span class="msg-delivery">' + deliveryBadges + '</span>' +
+        '<span class="msg-snippet">' + esc(displaySnippet) + '</span>';
 
       const detail = document.createElement('div');
       detail.className = 'msg-detail json-tree';
