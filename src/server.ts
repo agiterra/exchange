@@ -17,8 +17,7 @@
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
-import { existsSync, readFileSync, watch, watchFile } from "fs";
-import { homedir } from "os";
+import { watchFile } from "fs";
 import { join } from "path";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -771,64 +770,6 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       };
     });
     return c.json(messages);
-  });
-
-  // --- Tasks endpoint ---
-
-  app.get("/tasks", (c) => {
-    if (!isOperator(c)) {
-      return c.json({ error: "unauthorized" }, 401);
-    }
-    const tasksPath = join(homedir(), ".wire", "tasks.json");
-    if (!existsSync(tasksPath)) {
-      return c.json({ tasks: [], completed: [] });
-    }
-    try {
-      const data = JSON.parse(readFileSync(tasksPath, "utf-8"));
-      return c.json(data, 200, {
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-      });
-    } catch {
-      return c.json({ error: "failed to read tasks" }, 500);
-    }
-  });
-
-  app.get("/tasks/stream", (c) => {
-    if (!isOperator(c)) {
-      return c.json({ error: "unauthorized" }, 401);
-    }
-    const tasksPath = join(homedir(), ".wire", "tasks.json");
-
-    return new Response(
-      new ReadableStream({
-        start(controller) {
-          const enc = new TextEncoder();
-          const send = () => {
-            try {
-              if (existsSync(tasksPath)) {
-                const data = readFileSync(tasksPath, "utf-8");
-                controller.enqueue(enc.encode(`data: ${data.replace(/\n/g, "")}\n\n`));
-              }
-            } catch {}
-          };
-          // Send initial state
-          send();
-          // Watch for file changes
-          if (existsSync(tasksPath)) {
-            const watcher = watch(tasksPath, { persistent: false }, () => send());
-            c.req.raw.signal.addEventListener("abort", () => watcher.close());
-          }
-        },
-      }),
-      {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      },
-    );
   });
 
   // --- Dashboard SSE (live agent status) ---

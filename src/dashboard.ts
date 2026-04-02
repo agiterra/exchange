@@ -223,22 +223,20 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
     .msg-entry:last-child { border-bottom: none; }
     .msg-summary {
-      display: flex;
-      gap: 12px;
-      align-items: baseline;
       overflow: hidden;
-      white-space: nowrap;
     }
-    .msg-ts { color: #525252; font-size: 11px; min-width: 80px; flex-shrink: 0; }
-    .msg-seq { color: #6b7280; font-size: 11px; min-width: 40px; flex-shrink: 0; }
-    .msg-source { color: #60a5fa; min-width: 80px; flex-shrink: 0; }
+    .msg-text { color: #d4d4d4; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .msg-meta { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: #525252; margin-top: 1px; }
+    .msg-entry:not(.expanded) .msg-meta { display: none; }
+    .msg-ts { color: #525252; min-width: 80px; flex-shrink: 0; }
+    .msg-seq { color: #6b7280; min-width: 40px; flex-shrink: 0; }
+    .msg-source { color: #60a5fa; flex-shrink: 0; }
     .msg-arrow { color: #3f3f46; flex-shrink: 0; }
-    .msg-dest { color: #a78bfa; min-width: 80px; flex-shrink: 0; }
+    .msg-dest { color: #a78bfa; flex-shrink: 0; }
     .msg-topic { color: #fbbf24; flex-shrink: 0; }
     .msg-delivery { font-size: 11px; flex-shrink: 0; }
     .msg-delivery .ok { color: #4ade80; }
     .msg-delivery .skip { color: #f87171; }
-    .msg-snippet { color: #3f3f46; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .msg-detail {
       display: none;
       margin: 4px 0 4px 92px;
@@ -272,28 +270,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .json-bracket { color: #525252; }
     .json-comma { color: #525252; }
     .json-preview { color: #3f3f46; }
-    .tasks-list { margin-bottom: 8px; padding-left: 0; }
-    .tasks-list ol { margin: 0; padding-left: 24px; list-style: decimal; }
-    .tasks-list ol li { color: #525252; padding: 0; margin: 0; }
-    .task-row {
-      display: flex;
-      align-items: baseline;
-      gap: 12px;
-      padding: 6px 0;
-      border-bottom: 1px solid #141414;
-      cursor: pointer;
-    }
-    .task-row:hover { background: #111; }
-    .task-title { color: #e5e5e5; flex: 1; }
-    .task-owner { color: #6b7280; font-size: 11px; min-width: 80px; }
-    .task-status { font-size: 11px; min-width: 100px; text-align: right; }
-    .task-status.done { color: #4ade80; }
-    .task-status.in_progress, .task-status.code_complete { color: #fbbf24; }
-    .task-status.blocked { color: #f87171; }
-    .task-status.not_started, .task-status.ready { color: #6b7280; }
-    .task-status.planned { color: #a78bfa; }
-    .task-details { color: #525252; font-size: 11px; padding: 2px 0 4px 12px; display: none; }
-    .task-row.expanded + .task-details { display: block; }
     .stats {
       display: flex;
       gap: 32px;
@@ -352,15 +328,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     <div id="message-log"></div>
   </div>
 
-  <div class="form-section" id="tasks-section">
-    <div style="display:flex;align-items:center;gap:12px">
-      <h2>Tasks</h2>
-      <label style="font-size:11px;color:#6b7280;cursor:pointer;user-select:none">
-        <input type="checkbox" id="show-done" style="margin-right:4px"> Show done
-      </label>
-    </div>
-    <div id="tasks-list" class="tasks-list">Loading...</div>
-  </div>
 
   <div class="form-section">
     <h2>Register Agent</h2>
@@ -468,15 +435,27 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
       const summary = document.createElement('div');
       summary.className = 'msg-summary';
+      // Extract readable text: try parsed.text, then parsed.content, then snippet
+      let msgText = '';
+      if (parsed && typeof parsed === 'object') {
+        msgText = parsed.text || parsed.content || parsed.message || parsed.body || '';
+        if (typeof msgText === 'object') msgText = '';
+      }
+      if (!msgText && typeof parsed === 'string') msgText = parsed;
+      if (!msgText) msgText = shortSnippet;
+      const shortText = msgText.length > 120 ? msgText.slice(0, 120) + '\u2026' : msgText;
+
       summary.innerHTML =
-        '<span class="msg-ts">' + ts + '</span>' +
-        '<span class="msg-seq">#' + msg.seq + '</span>' +
-        '<span class="msg-source">' + esc(msg.source || '') + '</span>' +
-        '<span class="msg-arrow">\u2192</span>' +
-        '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
-        '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
-        '<span class="msg-delivery">' + deliveryBadges + '</span>' +
-        '<span class="msg-snippet">' + esc(shortSnippet) + '</span>';
+        '<span class="msg-text">' + esc(shortText) + '</span>' +
+        '<span class="msg-meta">' +
+          '<span class="msg-ts">' + ts + '</span>' +
+          '<span class="msg-seq">#' + msg.seq + '</span>' +
+          '<span class="msg-source">' + esc(msg.source || '') + '</span>' +
+          '<span class="msg-arrow">\u2192</span>' +
+          '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
+          '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
+          '<span class="msg-delivery">' + deliveryBadges + '</span>' +
+        '</span>';
 
       const detail = document.createElement('div');
       detail.className = 'msg-detail json-tree';
@@ -637,49 +616,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       document.getElementById('key-output').style.display = 'block';
     }
 
-    // --- Tasks ---
-    async function loadTasks() {
-      try {
-        const res = await fetch('/tasks');
-        if (!res.ok) return;
-        const data = await res.json();
-        renderTasks(data);
-      } catch {}
-    }
-
-    let lastTaskData = null;
-    function renderTasks(data) {
-      lastTaskData = data;
-      const el = document.getElementById('tasks-list');
-      const showDone = document.getElementById('show-done').checked;
-      const tasks = (data.tasks || []).filter(t => showDone || t.status !== 'done');
-      if (!tasks.length) {
-        const hidden = (data.tasks || []).length - tasks.length;
-        el.innerHTML = '<span class="dim">No tasks' + (hidden ? ' (' + hidden + ' done)' : '') + '</span>';
-        return;
-      }
-      el.innerHTML = '<ol>' + tasks.map(t => {
-        const statusLabel = (t.status || '').replace(/_/g, ' ');
-        const statusClass = t.status || 'not_started';
-        return '<li>' +
-          '<div class="task-row" onclick="this.classList.toggle(\\'expanded\\')">' +
-          '<span class="task-title">' + esc(t.title) + '</span>' +
-          '<span class="task-owner">' + esc(t.owner || '') + '</span>' +
-          '<span class="task-status ' + statusClass + '">' + esc(statusLabel) + '</span>' +
-          '</div>' +
-          '<div class="task-details">' + esc(t.details || '') + '</div>' +
-          '</li>';
-      }).join('') + '</ol>';
-    }
-
-    document.getElementById('show-done').onchange = () => { if (lastTaskData) renderTasks(lastTaskData); };
-    loadTasks();
-
-    // Live task updates via SSE
-    const taskStream = new EventSource('/tasks/stream');
-    taskStream.onmessage = (e) => {
-      try { renderTasks(JSON.parse(e.data)); } catch {}
-    };
 
     async function registerAgent() {
       const id = document.getElementById('new-agent-id').value.trim();
