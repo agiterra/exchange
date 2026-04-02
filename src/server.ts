@@ -4,7 +4,7 @@
  * Routes:
  *   GET  /health
  *   GET  /agents                         — list registered agents
- *   POST /agents/register                — register/update agent + subscriptions
+ *   POST /agents/register                — register/update agent
  *   POST /agents/connect                 — create session, start SSE delivery
  *   POST /agents/disconnect              — end session
  *   POST /agents/ack                     — advance session cursor
@@ -43,6 +43,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const dashboardPath = join(__dirname, "dashboard.ts");
 let _renderDashboard = _initialRenderDashboard;
 const dashboardRefreshListeners = new Set<() => void>();
+const dashboardStateListeners = new Set<() => void>();
+
+/** Notify dashboard SSE clients of state change. */
+function notifyDashboard() {
+  for (const listener of dashboardStateListeners) listener();
+}
 let _serverLog: Logger | null = null;
 
 async function reloadDashboard() {
@@ -67,49 +73,24 @@ type ServerDeps = {
   log: Logger;
 };
 
-// --- Ed25519 signature verification ---
-
-async function verifyEd25519(pubkeyB64: string, signature: string, body: string): Promise<boolean> {
-  try {
-    const pubkeyBytes = Uint8Array.from(atob(pubkeyB64), (c) => c.charCodeAt(0));
-    const sigBytes = Uint8Array.from(atob(signature), (c) => c.charCodeAt(0));
-    const bodyBytes = new TextEncoder().encode(body);
-    const key = await crypto.subtle.importKey(
-      "raw",
-      pubkeyBytes,
-      { name: "Ed25519" },
-      false,
-      ["verify"],
-    );
-    return await crypto.subtle.verify("Ed25519", key, sigBytes, bodyBytes);
-  } catch {
-    return false;
-  }
-}
-
-// --- JWT default webhook validator ---
+// --- JWT verification ---
 
 function b64urlDecode(s: string): Uint8Array {
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-type JwtValidatorResult = {
-  source: string;
-  sender_display_name: string;
-  topic: string;
-};
 
 /**
- * Default webhook validator — verifies JWT Bearer token with Ed25519 signature.
- * Checks: sender identity (iss), signature, body hash integrity.
- * Returns routing info (source, topic) extracted from verified claims.
+ * Verify JWT Bearer token — Ed25519 signature + body hash integrity.
+ * Returns verified claims and sender info. Does not require any specific claims
+ * beyond iss and body_hash.
  */
-async function verifyJwtSender(
+async function verifyJwt(
   headers: Record<string, string>,
   rawBody: string,
   store: Store,
-): Promise<JwtValidatorResult> {
+): Promise<{ sender: string; sender_display_name: string; claims: Record<string, unknown> }> {
   const authHeader = headers["authorization"] ?? "";
   if (!authHeader.startsWith("Bearer ")) {
     throw new Error("missing bearer token");
@@ -120,12 +101,10 @@ async function verifyJwtSender(
   if (parts.length !== 3) throw new Error("invalid JWT: expected 3 parts");
   const [headerB64, payloadB64, sigB64] = parts;
 
-  // Decode claims
   const claims = JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64)));
   const sender = claims.iss;
   if (!sender) throw new Error("missing iss claim");
 
-  // Look up sender in agent directory
   const agent = store.getAgent(sender);
   if (!agent) throw new Error(`unknown sender: ${sender}`);
 
@@ -138,15 +117,26 @@ async function verifyJwtSender(
   if (!valid) throw new Error("invalid JWT signature");
 
   // Verify body hash
+  if (!claims.body_hash) throw new Error("missing body_hash claim");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody));
   const bodyHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (bodyHash !== claims.body_hash) throw new Error("body hash mismatch");
 
-  return {
-    source: sender,
-    sender_display_name: agent.display_name,
-    topic: claims.topic ?? "ipc",
-  };
+  return { sender, sender_display_name: agent.display_name, claims };
+}
+
+/**
+ * Verify JWT for message routing — requires topic claim.
+ */
+// --- Webhook Cleanup (VM-lite) ---
+
+export async function runCleanup(
+  code: string,
+  ctx: { meta: Record<string, unknown>; secrets: Record<string, string> },
+): Promise<void> {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const fn = new AsyncFunction("meta", "secrets", "fetch", code);
+  await fn(ctx.meta, ctx.secrets, fetch);
 }
 
 export function createServer({ port, store, router, emitter, log }: ServerDeps) {
@@ -157,23 +147,13 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
   // Cache raw body text so signature verification works after c.req.json()
   app.use("*", async (c, next) => {
-    if (c.req.method === "POST" || c.req.method === "PUT") {
+    if (c.req.method === "POST" || c.req.method === "PUT" || c.req.method === "DELETE") {
       (c as any).set("rawBody", await c.req.raw.clone().text());
     }
     await next();
   });
 
   // --- Auth primitives ---
-
-  /** Verify Ed25519 signature against a specific agent's stored pubkey. */
-  async function verifyAgentSignature(c: Context, agentId: string): Promise<boolean> {
-    const agent = store.getAgent(agentId);
-    if (!agent) return false;
-    const sig = c.req.header("x-wire-signature");
-    if (!sig) return false;
-    const body = (c as any).get("rawBody") ?? "";
-    return verifyEd25519(agent.pubkey, sig, body);
-  }
 
   /** Check for authenticated operator via WebAuthn session cookie or dashboard token. */
   const DASHBOARD_TOKEN = process.env.WIRE_DASHBOARD_TOKEN;
@@ -198,33 +178,54 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     return !!session && session.agent_id === agentId;
   }
 
+
+  /**
+   * Verify JWT and return authenticated agent ID.
+   * Combines auth check + agent_id extraction for endpoints where
+   * the caller IS the agent (connect, disconnect, ack, heartbeat).
+   */
+  async function requireAuthenticatedAgent(c: Context): Promise<{ agentId: string } | Response> {
+    const authHeader = c.req.header("authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return c.json({ error: "Authorization: Bearer <JWT> required" }, 401);
+    }
+    try {
+      const { sender } = await verifyJwt(
+        { authorization: authHeader },
+        (c as any).get("rawBody") ?? "",
+        store,
+      );
+      const agent = store.getAgent(sender);
+      if (!agent) return c.json({ error: `agent '${sender}' not registered` }, 404);
+      return { agentId: sender };
+    } catch (e: any) {
+      return c.json({ error: `JWT verification failed: ${e.message}` }, 403);
+    }
+  }
+
   // --- Auth gates (return error Response or null for authorized) ---
 
-  /** Require authenticated agent (JWT Bearer or Ed25519 signature). */
+  /** Require authenticated agent (JWT Bearer). */
   async function requireAgent(c: Context, agentId: string): Promise<Response | null> {
     const agent = store.getAgent(agentId);
     if (!agent) return c.json({ error: `agent '${agentId}' not registered` }, 404);
 
-    // Try JWT Bearer token first
     const authHeader = c.req.header("authorization");
-    if (authHeader?.startsWith("Bearer ")) {
-      try {
-        const result = await verifyJwtSender(
-          { authorization: authHeader },
-          (c as any).get("rawBody") ?? "",
-          store,
-        );
-        if (result.source === agentId) return null;
-        return c.json({ error: "JWT issuer does not match agent" }, 403);
-      } catch (e: any) {
-        return c.json({ error: `JWT verification failed: ${e.message}` }, 403);
-      }
+    if (!authHeader?.startsWith("Bearer ")) {
+      return c.json({ error: "Authorization: Bearer <JWT> required" }, 401);
     }
 
-    // Fall back to Ed25519 raw signature
-    if (await verifyAgentSignature(c, agentId)) return null;
-
-    return c.json({ error: "Authorization header (Bearer JWT) or X-Wire-Signature required" }, 401);
+    try {
+      const { sender } = await verifyJwt(
+        { authorization: authHeader },
+        (c as any).get("rawBody") ?? "",
+        store,
+      );
+      if (sender === agentId) return null;
+      return c.json({ error: "JWT issuer does not match agent" }, 403);
+    } catch (e: any) {
+      return c.json({ error: `JWT verification failed: ${e.message}` }, 403);
+    }
   }
 
   /** Require agent owns the session (+ agent signature). */
@@ -241,16 +242,25 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     return c.json({ error: "operator authentication required" }, 401) as unknown as Response;
   }
 
-  /** Require either operator auth or signature from any registered agent. */
+  /** Require either operator auth or JWT signed by any registered agent. */
   async function requireAgentOrOperator(c: Context): Promise<Response | null> {
     if (isOperator(c)) return null;
-    const sig = c.req.header("x-wire-signature");
-    if (!sig) return c.json({ error: "X-Wire-Signature or operator session required" }, 401);
-    const body = (c as any).get("rawBody") ?? "";
-    for (const agent of store.getAllAgents()) {
-      if (await verifyEd25519(agent.pubkey, sig, body)) return null;
+
+    const authHeader = c.req.header("authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return c.json({ error: "Authorization: Bearer <JWT> or operator session required" }, 401);
     }
-    return c.json({ error: "invalid signature — no matching agent" }, 403);
+
+    try {
+      await verifyJwt(
+        { authorization: authHeader },
+        (c as any).get("rawBody") ?? "",
+        store,
+      );
+      return null;
+    } catch (e: any) {
+      return c.json({ error: `JWT verification failed: ${e.message}` }, 403);
+    }
   }
 
   // --- Health ---
@@ -273,32 +283,41 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
   app.post("/agents/register", async (c) => {
     const body = await c.req.json();
-    const { id, display_name, pubkey, permanent, subscriptions } = body;
+    const { id, display_name, pubkey, permanent } = body;
 
     if (!id || !display_name || !pubkey) {
       return c.json({ error: "missing required fields: id, display_name, pubkey" }, 400);
     }
 
     const existing = store.getAgent(id);
-    if (existing) {
-      // Existing agent re-registering — must prove identity with stored pubkey
+    if (existing && existing.permanent) {
+      // Permanent agent re-registering — must prove identity
       const err = await requireAgent(c, id);
       if (err) return err;
+    } else if (existing && !existing.permanent) {
+      // Ephemeral agent re-registering — allow the agent itself or any sponsoring agent
+      const selfErr = await requireAgent(c, id);
+      if (selfErr) {
+        const sponsorErr = await requireAgentOrOperator(c);
+        if (sponsorErr) return sponsorErr;
+      }
     } else if (permanent) {
       // New permanent agent — operator only
       const err = requireOperator(c);
       if (err) return err;
     } else {
-      // New ephemeral agent — must be registered by an authenticated agent or operator
-      const err = await requireAgentOrOperator(c);
-      if (err) return err;
+      // New ephemeral agent — check for a reaped agent with matching pubkey (re-admission)
+      const reaped = store.getReapedAgent(id);
+      if (reaped && reaped.pubkey === pubkey) {
+        // Same agent, same key — let them back in
+      } else {
+        // Truly new — must be registered by an authenticated agent or operator
+        const err = await requireAgentOrOperator(c);
+        if (err) return err;
+      }
     }
 
     store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent });
-
-    if (subscriptions && Array.isArray(subscriptions)) {
-      store.setSubscriptions(id, subscriptions);
-    }
 
     return c.json({ agent_id: id, registered: true }, 201);
   });
@@ -306,22 +325,25 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   // --- Session Lifecycle ---
 
   app.post("/agents/connect", async (c) => {
-    const body = await c.req.json();
-    const { agent_id } = body;
+    const auth = await requireAuthenticatedAgent(c);
+    if (auth instanceof Response) return auth;
+    const { agentId } = auth;
 
-    if (!agent_id) {
-      return c.json({ error: "missing agent_id" }, 400);
+    const body = await c.req.json();
+
+    // Clean up stale/disconnected sessions for same cc_session_id (reconnect dedup)
+    if (body.cc_session_id) {
+      const oldSessions = store.getSessionsByCCSession(agentId, body.cc_session_id);
+      for (const old of oldSessions) {
+        store.disconnectSession(old.id);
+        emitter.closeAndUnregister(agentId, old.id);
+      }
     }
 
-    const err = await requireAgent(c, agent_id);
-    if (err) return err;
-
-    // Don't kill existing sessions — they may be legitimate concurrent sessions.
-    // Stale sessions are handled by the heartbeat reconciler.
-
-    store.touchAgent(agent_id);
+    store.touchAgent(agentId);
     // cc_session_id identifies the Claude Code session (survives SSE reconnects)
-    const session = store.createSession(agent_id, "claude-code", body.cc_session_id);
+    const session = store.createSession(agentId, "claude-code", body.cc_session_id);
+    notifyDashboard();
 
     return c.json({
       session_id: session.id,
@@ -331,37 +353,48 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
   });
 
   app.post("/agents/disconnect", async (c) => {
-    const body = await c.req.json();
-    const { session_id, agent_id } = body;
+    const auth = await requireAuthenticatedAgent(c);
+    if (auth instanceof Response) return auth;
+    const { agentId } = auth;
 
-    if (!session_id || !agent_id) {
-      return c.json({ error: "missing session_id or agent_id" }, 400);
+    const body = await c.req.json();
+    const { session_id } = body;
+
+    if (!session_id) {
+      return c.json({ error: "missing session_id" }, 400);
     }
 
-    const err = await requireAgentSession(c, agent_id, session_id);
-    if (err) return err;
+    if (!isSessionOwner(session_id, agentId)) {
+      return c.json({ error: "session does not belong to agent" }, 403);
+    }
 
     store.disconnectSession(session_id);
-    emitter.closeAndUnregister(agent_id, session_id);
+    emitter.closeAndUnregister(agentId, session_id);
+    notifyDashboard();
     return c.json({ disconnected: true });
   });
 
   app.post("/agents/ack", async (c) => {
-    const body = await c.req.json();
-    const { session_id, seq, agent_id } = body;
+    const auth = await requireAuthenticatedAgent(c);
+    if (auth instanceof Response) return auth;
+    const { agentId } = auth;
 
-    if (!session_id || seq == null || !agent_id) {
-      return c.json({ error: "missing session_id, seq, or agent_id" }, 400);
+    const body = await c.req.json();
+    const { session_id, seq } = body;
+
+    if (!session_id || seq == null) {
+      return c.json({ error: "missing session_id or seq" }, 400);
     }
 
-    const err = await requireAgentSession(c, agent_id, session_id);
-    if (err) return err;
+    if (!isSessionOwner(session_id, agentId)) {
+      return c.json({ error: "session does not belong to agent" }, 403);
+    }
 
     store.ackSession(session_id, seq);
     return c.json({ acked: seq });
   });
 
-  // --- Temporal Query (cross-channel context) ---
+  // --- Temporal Query ---
 
   app.get("/agents/:id/recent", (c) => {
     const agentId = c.req.param("id");
@@ -374,7 +407,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       return c.json({ error: `agent '${agentId}' not registered` }, 404);
     }
 
-    // Get recent messages across all channels for this agent
+    // Get recent messages across all names for this agent
     const messages = store.getRecentMessages(agentId, cutoff, limit);
     return c.json({ agent_id: agentId, minutes, count: messages.length, messages });
   });
@@ -487,10 +520,13 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     if (err) return err;
 
     const body = await c.req.json();
-    const { plugin, validator, webhook_secret, filter: filterExpr, meta } = body;
+    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup } = body;
 
     if (!plugin) {
       return c.json({ error: "missing plugin" }, 400);
+    }
+    if (!name) {
+      return c.json({ error: "missing name" }, 400);
     }
 
     // Validate filter expression if provided
@@ -508,15 +544,17 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     const webhookId = store.createWebhook({
       agentId,
       plugin,
+      name,
       validator: validator ?? (webhook_secret ? "hmac" : "jwt-default"),
       secretsMap,
       filter: filterExpr,
       meta: meta ? JSON.stringify(meta) : undefined,
+      cleanup: cleanup ?? undefined,
     });
 
     return c.json({
       webhook_id: webhookId,
-      url: `/webhooks/${agentId}/${plugin}`,
+      url: `/webhooks/${agentId}/${plugin}/${name}`,
       registered: true,
     });
   });
@@ -533,23 +571,29 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       return c.json({ error: "webhook not found" }, 404);
     }
 
+    // Run client-provided cleanup code if registered
+    if (webhook.cleanup) {
+      const secrets = webhook.secrets_map ? JSON.parse(webhook.secrets_map) : {};
+      const meta = webhook.meta ? JSON.parse(webhook.meta) : {};
+      runCleanup(webhook.cleanup, { meta, secrets }).catch(() => {});
+    }
+
     store.deleteWebhook(webhookId);
     return c.json({ deleted: webhookId });
   });
 
   // --- Inbound Webhook ---
 
-  app.post("/webhooks/:agent/:plugin", async (c) => {
-    const agentId = c.req.param("agent");
-    const plugin = c.req.param("plugin");
-
-    const rawBody = await c.req.text();
+  /** Shared webhook delivery logic. */
+  async function handleWebhook(
+    c: Context,
+    agentId: string,
+    plugin: string,
+    webhook: ReturnType<typeof store.getWebhookById> | null,
+  ): Promise<Response> {
+    const rawBody = (c as any).get("rawBody") ?? await c.req.text();
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((v, k) => { headers[k] = v; });
-
-    // Look up webhook registration
-    const webhooks = store.getWebhooksForAgent(agentId, plugin);
-    const webhook = webhooks[0]; // first match
 
     let source = agentId;
     let topic = `webhook.${plugin}`;
@@ -561,19 +605,17 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       const validatorCode = webhook.validator;
 
       if (validatorCode && validatorCode !== "jwt-default") {
-        // Run client-provided validator in VM sandbox
-        try {
-          const agents = store.getAllAgents();
-          const directory: Record<string, { pubkey: string; display_name: string }> = {};
-          for (const a of agents) directory[a.id] = { pubkey: a.pubkey, display_name: a.display_name };
+        const agents = store.getAllAgents();
+        const directory: Record<string, { pubkey: string; display_name: string }> = {};
+        for (const a of agents) directory[a.id] = { pubkey: a.pubkey, display_name: a.display_name };
 
+        try {
           const result = await runValidator(validatorCode, {
             headers, body: rawBody, secrets, directory,
           });
           if (!result) {
             return c.json({ error: "webhook validation failed" }, 401);
           }
-          // Validator can return { source, topic } to override routing
           if (typeof result === "object" && result !== null) {
             const r = result as Record<string, unknown>;
             if (r.source) source = String(r.source);
@@ -583,40 +625,35 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
           return c.json({ error: "validator error", detail: String(e) }, 401);
         }
       } else {
-        // Default JWT validator
         try {
-          const verified = await verifyJwtSender(headers, rawBody, store);
-          source = verified.source;
-          topic = verified.topic;
+          const { sender } = await verifyJwt(headers, rawBody, store);
+          source = sender;
         } catch (e) {
           return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
         }
       }
 
-      // Apply filter
       if (webhook.filter) {
-        if (!evaluateFilter(webhook.filter, { headers, event: headers["x-github-event"] ?? "", payload: parsedBody })) {
+        if (!evaluateFilter(webhook.filter, { headers, payload: parsedBody })) {
           return c.json({ filtered: true, delivered: false });
         }
       }
     } else {
-      // No webhook registration — fall back to JWT validation
       try {
-        const verified = await verifyJwtSender(headers, rawBody, store);
-        source = verified.source;
-        topic = verified.topic;
+        const { sender } = await verifyJwt(headers, rawBody, store);
+        source = sender;
       } catch (e) {
         return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
       }
     }
 
     // Build envelope and route
-    const payload = {
+    const envelope = {
       source,
       topic,
       dest: agentId,
       plugin,
-      event: headers["x-github-event"] ?? undefined,
+      headers,
       payload: parsedBody,
     };
 
@@ -624,7 +661,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       source,
       dest: agentId,
       topic,
-      payload: JSON.stringify(payload),
+      payload: JSON.stringify(envelope),
       raw: rawBody,
     });
 
@@ -632,6 +669,28 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       seq: message.seq,
       delivered_to: deliveries,
     });
+  }
+
+  // Route with name — direct webhook lookup
+  app.post("/webhooks/:agent/:plugin/:name", async (c) => {
+    const agentId = c.req.param("agent");
+    const plugin = c.req.param("plugin");
+    const name = c.req.param("name");
+
+    const webhook = store.getWebhookByName(agentId, plugin, name);
+    if (!webhook) {
+      return c.json({ error: "webhook not found" }, 404);
+    }
+
+    return handleWebhook(c, agentId, plugin, webhook);
+  });
+
+  // Route without name — no webhook registration, JWT auth only
+  app.post("/webhooks/:agent/:plugin", async (c) => {
+    const agentId = c.req.param("agent");
+    const plugin = c.req.param("plugin");
+
+    return handleWebhook(c, agentId, plugin, null);
   });
 
   // --- Dashboard ---
@@ -772,7 +831,8 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
           sendState();
 
-          // Poll every 3 seconds for changes
+          // Push on state changes + poll every 3s as fallback
+          dashboardStateListeners.add(sendState);
           const interval = setInterval(sendState, 3000);
 
           // Live message log (backfill handled client-side via /messages/recent)
@@ -802,6 +862,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
           c.req.raw.signal.addEventListener("abort", () => {
             clearInterval(interval);
             unsubRoute();
+            dashboardStateListeners.delete(sendState);
             dashboardRefreshListeners.delete(onRefresh);
           });
         },
@@ -963,7 +1024,7 @@ async function runValidator(
         },
       };
     },
-    // Ed25519 verify for IPC validators
+    // Ed25519 verify (available to all validators)
     async verifyEd25519(pubkeyB64: string, signatureB64: string, data: string): Promise<boolean> {
       try {
         const pubBytes = Uint8Array.from(atob(pubkeyB64), (c) => c.charCodeAt(0));

@@ -30,14 +30,15 @@ CREATE TABLE IF NOT EXISTS agents (
     permanent       INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
     last_seen_at    INTEGER,
-    plan            TEXT
+    plan            TEXT,
+    reaped_at       INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
     id              TEXT PRIMARY KEY,
     agent_id        TEXT NOT NULL REFERENCES agents(id),
     runtime         TEXT NOT NULL,
-    channel_url     TEXT,
+    name_url     TEXT,
     connected_at    INTEGER,
     disconnected_at INTEGER,
     last_ack_seq    INTEGER NOT NULL DEFAULT 0,
@@ -72,11 +73,14 @@ CREATE TABLE IF NOT EXISTS webhooks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id    TEXT NOT NULL REFERENCES agents(id),
     plugin      TEXT NOT NULL,
+    name     TEXT NOT NULL,
     validator   TEXT,
     secrets_map TEXT,
     filter      TEXT,
     meta        TEXT,
-    created_at  INTEGER NOT NULL
+    cleanup     TEXT,
+    created_at  INTEGER NOT NULL,
+    UNIQUE(agent_id, plugin, name)
 );
 CREATE INDEX IF NOT EXISTS idx_webhooks_agent ON webhooks(agent_id);
 CREATE INDEX IF NOT EXISTS idx_webhooks_plugin ON webhooks(agent_id, plugin);
@@ -150,7 +154,7 @@ export type AgentSession = {
   id: string;
   agent_id: string;
   runtime: string;
-  channel_url: string | null;
+  name_url: string | null;
   connected_at: number | null;
   disconnected_at: number | null;
   last_ack_seq: number;
@@ -164,20 +168,15 @@ export type Webhook = {
   id: number;
   agent_id: string;
   plugin: string;
+  name: string;
   validator: string | null;
   secrets_map: string | null;
   filter: string | null;
   meta: string | null;
+  cleanup: string | null;
   created_at: number;
 };
 
-export type Subscription = {
-  id: number;
-  agent_id: string;
-  topic: string;
-  filter: string | null;
-  created_at: number;
-};
 
 export class Store {
   private db: Database;
@@ -218,7 +217,7 @@ export class Store {
       this.db.exec("ALTER TABLE messages ADD COLUMN source_cc_session TEXT");
     }
 
-    // Add filter + meta columns to webhooks (channel plugin infrastructure)
+    // Add filter + meta columns to webhooks (name plugin infrastructure)
     const whCols = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
     if (!whCols.some((c) => c.name === "filter")) {
       this.db.exec("ALTER TABLE webhooks ADD COLUMN filter TEXT");
@@ -226,9 +225,43 @@ export class Store {
     if (!whCols.some((c) => c.name === "meta")) {
       this.db.exec("ALTER TABLE webhooks ADD COLUMN meta TEXT");
     }
-    // Drop old unique constraint by rebuilding table if it exists
-    // (SQLite can't drop constraints, but the CREATE TABLE IF NOT EXISTS
-    // already has the correct schema without UNIQUE for new databases)
+    if (!whCols.some((c) => c.name === "cleanup")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN cleanup TEXT");
+    }
+    if (!whCols.some((c) => c.name === "name")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN name TEXT NOT NULL DEFAULT 'default'");
+      this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_webhooks_name ON webhooks(agent_id, plugin, name)");
+    }
+    // Rebuild webhooks table to replace UNIQUE(agent_id, plugin) with UNIQUE(agent_id, plugin, name)
+    const tableInfo = this.db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name = 'webhooks' AND type = 'table'").get() as { sql: string } | null;
+    if (tableInfo?.sql.includes("UNIQUE(agent_id, plugin)") && !tableInfo.sql.includes("UNIQUE(agent_id, plugin, name)")) {
+      this.db.exec(`
+        CREATE TABLE webhooks_new (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          agent_id    TEXT NOT NULL REFERENCES agents(id),
+          plugin      TEXT NOT NULL,
+          name        TEXT NOT NULL DEFAULT 'default',
+          validator   TEXT,
+          secrets_map TEXT,
+          filter      TEXT,
+          meta        TEXT,
+          cleanup     TEXT,
+          created_at  INTEGER NOT NULL,
+          UNIQUE(agent_id, plugin, name)
+        );
+        INSERT INTO webhooks_new SELECT id, agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, created_at FROM webhooks;
+        DROP TABLE webhooks;
+        ALTER TABLE webhooks_new RENAME TO webhooks;
+        CREATE INDEX idx_webhooks_agent ON webhooks(agent_id);
+        CREATE INDEX idx_webhooks_plugin ON webhooks(agent_id, plugin);
+      `);
+    }
+
+    // Add reaped_at column to agents
+    const agentCols2 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!agentCols2.some((c) => c.name === "reaped_at")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN reaped_at INTEGER");
+    }
   }
 
   // --- Messages ---
@@ -283,23 +316,24 @@ export class Store {
   // --- Agents ---
 
   getAgent(id: string): Agent | null {
-    return (this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent) ?? null;
+    return (this.db.prepare("SELECT * FROM agents WHERE id = ? AND reaped_at IS NULL").get(id) as Agent) ?? null;
   }
 
   getAllAgents(): Agent[] {
-    return this.db.prepare("SELECT * FROM agents").all() as Agent[];
+    return this.db.prepare("SELECT * FROM agents WHERE reaped_at IS NULL").all() as Agent[];
   }
 
   upsertAgent(agent: { id: string; display_name: string; pubkey: string; permanent?: boolean }): void {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO agents (id, display_name, pubkey, permanent, created_at, last_seen_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO agents (id, display_name, pubkey, permanent, created_at, last_seen_at, reaped_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL)
       ON CONFLICT(id) DO UPDATE SET
         display_name = excluded.display_name,
         pubkey = excluded.pubkey,
         permanent = CASE WHEN excluded.permanent = 1 THEN 1 ELSE agents.permanent END,
-        last_seen_at = excluded.last_seen_at
+        last_seen_at = excluded.last_seen_at,
+        reaped_at = NULL
     `).run(agent.id, agent.display_name, agent.pubkey, agent.permanent ? 1 : 0, now, now);
   }
 
@@ -424,30 +458,12 @@ export class Store {
       transitions.push({ sessionId: row.id, agentId: row.agent_id, newStatus: "disconnected" });
     }
 
+    // Purge old disconnected sessions (no reason to keep them)
+    this.db.prepare(
+      "DELETE FROM agent_sessions WHERE status = 'disconnected' AND disconnected_at < ?"
+    ).run(now - disconnectMs);
+
     return transitions;
-  }
-
-  // --- Subscriptions ---
-
-  getSubscriptions(agentId: string): Subscription[] {
-    return this.db.prepare(
-      "SELECT * FROM subscriptions WHERE agent_id = ?"
-    ).all(agentId) as Subscription[];
-  }
-
-  getAllSubscriptions(): Subscription[] {
-    return this.db.prepare("SELECT * FROM subscriptions").all() as Subscription[];
-  }
-
-  setSubscriptions(agentId: string, topics: { topic: string; filter?: string }[]): void {
-    const now = Date.now();
-    this.db.prepare("DELETE FROM subscriptions WHERE agent_id = ?").run(agentId);
-    const stmt = this.db.prepare(
-      "INSERT INTO subscriptions (agent_id, topic, filter, created_at) VALUES (?, ?, ?, ?)"
-    );
-    for (const sub of topics) {
-      stmt.run(agentId, sub.topic, sub.filter ?? null, now);
-    }
   }
 
   // --- Webhooks ---
@@ -479,22 +495,30 @@ export class Store {
     ).all(plugin) as Webhook[];
   }
 
+  getWebhookByName(agentId: string, plugin: string, name: string): Webhook | null {
+    return (this.db.prepare(
+      "SELECT * FROM webhooks WHERE agent_id = ? AND plugin = ? AND name = ?"
+    ).get(agentId, plugin, name) as Webhook) ?? null;
+  }
+
   createWebhook(opts: {
     agentId: string;
     plugin: string;
+    name: string;
     validator?: string;
     secretsMap?: string;
     filter?: string;
     meta?: string;
+    cleanup?: string;
   }): number {
     const now = Date.now();
     const result = this.db.prepare(`
-      INSERT INTO webhooks (agent_id, plugin, validator, secrets_map, filter, meta, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      opts.agentId, opts.plugin,
+      opts.agentId, opts.plugin, opts.name,
       opts.validator ?? null, opts.secretsMap ?? null,
-      opts.filter ?? null, opts.meta ?? null, now,
+      opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, now,
     );
     return Number(result.lastInsertRowid);
   }
@@ -550,24 +574,34 @@ export class Store {
     return (this.db.prepare(`
       SELECT a.id FROM agents a
       WHERE a.permanent = 0
+        AND a.reaped_at IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM agent_sessions s
-          WHERE s.agent_id = a.id AND s.disconnected_at IS NULL
+          WHERE s.agent_id = a.id AND s.status IN ('connected', 'stale')
         )
-        AND (a.last_seen_at IS NULL OR a.last_seen_at < ?)
-    `).all(cutoff) as { id: string }[]).map((r) => r.id);
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_sessions s
+          WHERE s.agent_id = a.id AND s.last_heartbeat > ?
+        )
+        AND a.created_at < ?
+    `).all(cutoff, cutoff) as { id: string }[]).map((r) => r.id);
   }
 
   cleanEphemeralAgents(ttlMs: number): string[] {
     const candidates = this.getEphemeralCandidates(ttlMs);
 
     for (const id of candidates) {
-      this.db.prepare("DELETE FROM subscriptions WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
-      this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+      this.db.prepare("UPDATE agents SET reaped_at = ? WHERE id = ?").run(Date.now(), id);
     }
     return candidates;
+  }
+
+  getReapedAgent(id: string): { id: string; pubkey: string } | null {
+    return (this.db.prepare(
+      "SELECT id, pubkey FROM agents WHERE id = ? AND reaped_at IS NOT NULL"
+    ).get(id) as { id: string; pubkey: string }) ?? null;
   }
 
   // --- Operators ---
