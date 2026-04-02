@@ -229,12 +229,11 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       overflow: hidden;
       white-space: nowrap;
     }
-    .msg-ts { color: #525252; font-size: 11px; min-width: 80px; flex-shrink: 0; }
+    .msg-ts { color: #525252; font-size: 11px; min-width: 140px; flex-shrink: 0; }
     .msg-seq { color: #6b7280; font-size: 11px; min-width: 40px; flex-shrink: 0; }
     .msg-source { color: #60a5fa; min-width: 80px; flex-shrink: 0; }
     .msg-arrow { color: #3f3f46; flex-shrink: 0; }
     .msg-dest { color: #a78bfa; min-width: 80px; flex-shrink: 0; }
-    .msg-topic { color: #fbbf24; flex-shrink: 0; }
     .msg-delivery { font-size: 11px; flex-shrink: 0; }
     .msg-delivery .ok { color: #4ade80; }
     .msg-delivery .skip { color: #f87171; }
@@ -412,7 +411,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     let msgCount = 0;
     function addMessageEntry(msg) {
       const log = document.getElementById('message-log');
-      const ts = new Date(msg.created_at).toLocaleTimeString();
+      const d = new Date(msg.created_at);
+      const ts = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString();
       const deliveryBadges = (msg.deliveries || []).map(d =>
         '<span class="' + (d.status === 'delivered' ? 'ok' : 'skip') + '">' + esc(d.agentId) + '</span>'
       ).join(' ');
@@ -454,7 +454,6 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         '<span class="msg-source">' + esc(msg.source || '') + '</span>' +
         '<span class="msg-arrow">\u2192</span>' +
         '<span class="msg-dest">' + esc(msg.dest || '*') + '</span>' +
-        '<span class="msg-topic">' + esc(msg.topic || '') + '</span>' +
         '<span class="msg-delivery">' + deliveryBadges + '</span>' +
         '<span class="msg-snippet">' + esc(displaySnippet) + '</span>';
 
