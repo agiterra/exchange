@@ -442,6 +442,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       if (parsed && typeof parsed === 'object') {
         const readable = parsed.text
           ?? parsed.detail
+          ?? parsed.message
           ?? (parsed.type === 'wrap-up' ? 'Wrap-Up for ' + (parsed.ticket || '?') : null);
         if (typeof readable === 'string' && readable) {
           displaySnippet = readable.length > 80 ? readable.slice(0, 80) + '\u2026' : readable;
