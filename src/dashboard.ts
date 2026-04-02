@@ -437,10 +437,12 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
       const summary = document.createElement('div');
       summary.className = 'msg-summary';
-      // Prefer .text or .detail over raw stringified payload
+      // Prefer human-readable text over raw stringified payload
       let displaySnippet = shortSnippet;
       if (parsed && typeof parsed === 'object') {
-        const readable = parsed.text ?? parsed.detail;
+        const readable = parsed.text
+          ?? parsed.detail
+          ?? (parsed.type === 'wrap-up' ? 'Wrap-Up for ' + (parsed.ticket || '?') : null);
         if (typeof readable === 'string' && readable) {
           displaySnippet = readable.length > 80 ? readable.slice(0, 80) + '\u2026' : readable;
         }
