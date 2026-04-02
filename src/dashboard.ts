@@ -692,7 +692,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const res = await fetch('/agents/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, display_name: name, pubkey, subscriptions: [{ topic: '*' }] }),
+        body: JSON.stringify({ id, display_name: name, pubkey }),
       });
 
       if (res.ok) {

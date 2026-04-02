@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS webhooks (
     filter      TEXT,
     meta        TEXT,
     cleanup     TEXT,
+    dedup       TEXT,
     created_at  INTEGER NOT NULL,
     UNIQUE(agent_id, plugin, name)
 );
@@ -174,6 +175,7 @@ export type Webhook = {
   filter: string | null;
   meta: string | null;
   cleanup: string | null;
+  dedup: string | null;
   created_at: number;
 };
 
@@ -262,9 +264,24 @@ export class Store {
     if (!agentCols2.some((c) => c.name === "reaped_at")) {
       this.db.exec("ALTER TABLE agents ADD COLUMN reaped_at INTEGER");
     }
+
+    // Add dedup column to webhooks
+    const whCols2 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    if (!whCols2.some((c) => c.name === "dedup")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN dedup TEXT");
+    }
+
+    // Index source_id on messages for dedup lookups
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_messages_source_id ON messages(source_id)");
   }
 
   // --- Messages ---
+
+  getMessageBySourceId(sourceId: string): Message | null {
+    return (this.db.prepare(
+      "SELECT * FROM messages WHERE source_id = ? LIMIT 1"
+    ).get(sourceId) as Message) ?? null;
+  }
 
   writeMessage(msg: {
     source: string;
@@ -510,15 +527,16 @@ export class Store {
     filter?: string;
     meta?: string;
     cleanup?: string;
+    dedup?: string;
   }): number {
     const now = Date.now();
     const result = this.db.prepare(`
-      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.agentId, opts.plugin, opts.name,
       opts.validator ?? null, opts.secretsMap ?? null,
-      opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, now,
+      opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, now,
     );
     return Number(result.lastInsertRowid);
   }

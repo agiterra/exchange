@@ -33,7 +33,7 @@ import {
   generateAuthenticationOptions,
 } from "./auth.js";
 import type { Logger } from "pino";
-import { evaluateFilter, validateFilter } from "./filter.js";
+import { evaluateFilter, evaluateExpression, validateFilter } from "./filter.js";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
 import { dirname } from "path";
 import { fileURLToPath } from "url";
@@ -520,7 +520,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     if (err) return err;
 
     const body = await c.req.json();
-    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup } = body;
+    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup } = body;
 
     if (!plugin) {
       return c.json({ error: "missing plugin" }, 400);
@@ -550,6 +550,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       filter: filterExpr,
       meta: meta ? JSON.stringify(meta) : undefined,
       cleanup: cleanup ?? undefined,
+      dedup: dedup ?? undefined,
     });
 
     return c.json({
@@ -638,6 +639,21 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
           return c.json({ filtered: true, delivered: false });
         }
       }
+
+      // Dedup: client-provided expression extracts idempotency key
+      if (webhook.dedup) {
+        try {
+          const key = evaluateExpression(webhook.dedup, { headers, payload: parsedBody });
+          if (key && typeof key === "string") {
+            const existing = store.getMessageBySourceId(key);
+            if (existing) {
+              return c.json({ duplicate: true, existing_seq: existing.seq, delivered: false });
+            }
+            // Pass source_id through to route() for storage
+            (c as any).set("dedupKey", key);
+          }
+        } catch {}
+      }
     } else {
       try {
         const { sender } = await verifyJwt(headers, rawBody, store);
@@ -657,8 +673,10 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
       payload: parsedBody,
     };
 
+    const dedupKey = (c as any).get("dedupKey") as string | undefined;
     const { message, deliveries } = router.route({
       source,
+      source_id: dedupKey,
       dest: agentId,
       topic,
       payload: JSON.stringify(envelope),

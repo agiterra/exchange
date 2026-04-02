@@ -15,7 +15,7 @@ config({ path: join(homedir(), ".wire", ".env") });
 import { Store } from "./store.js";
 import { Router } from "./router.js";
 import { MessageEmitter } from "./emitter.js";
-import { createServer } from "./server.js";
+import { createServer, runCleanup } from "./server.js";
 
 const port = parseInt(process.env.WIRE_PORT ?? "9800", 10);
 const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
@@ -23,7 +23,7 @@ const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
 const staleMs = parseInt(process.env.STALE_MS ?? "15000", 10);
 const disconnectMs = parseInt(process.env.DISCONNECT_MS ?? "60000", 10);
 const reconcilerIntervalMs = parseInt(process.env.RECONCILER_INTERVAL_MS ?? "10000", 10);
-const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "60000", 10); // 1 minute default
+const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "300000", 10); // 5 minutes — must exceed agent boot time
 
 export const log = pino({ name: "wire" });
 
@@ -64,33 +64,19 @@ setInterval(() => {
     }
   } catch {}
 
-  // Before reaping ephemeral agents, collect their webhooks for external cleanup
+  // Before reaping ephemeral agents, run client-provided cleanup code for their webhooks
   const candidates = store.getEphemeralCandidates(ephemeralTtlMs);
   for (const agentId of candidates) {
     const webhooks = store.getWebhooksForAgent(agentId);
     for (const wh of webhooks) {
-      if (wh.meta) {
-        try {
-          const meta = JSON.parse(wh.meta);
-          if (meta.hook_id && meta.repo) {
-            // Delete GitHub webhook
-            const ghToken = process.env.GITHUB_TOKEN;
-            if (ghToken) {
-              fetch(`https://api.github.com/repos/${meta.repo}/hooks/${meta.hook_id}`, {
-                method: "DELETE",
-                headers: { Authorization: `Bearer ${ghToken}`, "User-Agent": "wire-server" },
-              }).then((res) => {
-                if (res.ok || res.status === 404) {
-                  log.info({ event: "github_hook_deleted", repo: meta.repo, hookId: meta.hook_id, agent: agentId }, "GitHub webhook deleted");
-                } else {
-                  log.error({ event: "github_hook_delete_failed", repo: meta.repo, hookId: meta.hook_id, status: res.status }, "GitHub webhook delete failed");
-                }
-              }).catch((e) => {
-                log.error({ event: "github_hook_delete_error", repo: meta.repo, hookId: meta.hook_id, err: e }, "GitHub webhook delete error");
-              });
-            }
-          }
-        } catch {}
+      if (wh.cleanup) {
+        const secrets = wh.secrets_map ? JSON.parse(wh.secrets_map) : {};
+        const meta = wh.meta ? JSON.parse(wh.meta) : {};
+        runCleanup(wh.cleanup, { meta, secrets }).then(() => {
+          log.info({ event: "webhook_cleanup_ok", agent: agentId }, "webhook cleanup ok");
+        }).catch((e) => {
+          log.error({ event: "webhook_cleanup_error", agent: agentId, err: e }, "webhook cleanup error");
+        });
       }
     }
   }

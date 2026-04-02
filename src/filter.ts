@@ -2,7 +2,7 @@
  * Filter VM sandbox — evaluates JS expressions for webhook routing.
  *
  * Filters are JS expressions that return true/false. They receive a context
- * object with event-specific fields (e.g. { event, payload } for GitHub).
+ * object with { headers, payload } from the inbound webhook.
  *
  * Uses Function constructor (not eval) for slightly better isolation.
  * The expression runs synchronously with a frozen context.
@@ -31,6 +31,20 @@ export function evaluateFilter(
     // Filter error = no match (fail closed)
     return false;
   }
+}
+
+/**
+ * Evaluate a JS expression and return the raw result (not coerced to boolean).
+ * Used for dedup key extraction and other value-returning expressions.
+ */
+export function evaluateExpression(
+  expr: string,
+  context: FilterContext,
+): unknown {
+  const keys = Object.keys(context);
+  const values = keys.map((k) => context[k]);
+  const fn = new Function(...keys, `"use strict"; return (${expr})`);
+  return fn(...values);
 }
 
 /**
