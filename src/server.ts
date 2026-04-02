@@ -424,17 +424,20 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     const agentId = c.req.param("id");
     const sessionId = c.req.query("session_id");
 
+    log.info({ event: "sse_request", agentId, sessionId }, "SSE stream requested");
+
     if (!sessionId) {
+      log.warn({ event: "sse_no_session", agentId }, "SSE: missing session_id");
       return c.json({ error: "missing session_id" }, 400);
     }
 
-    // Auth via session ownership — session_id was obtained via signed connect
     if (!isSessionOwner(sessionId, agentId)) {
+      log.warn({ event: "sse_auth_fail", agentId, sessionId }, "SSE: invalid session");
       return c.json({ error: "invalid session" }, 403);
     }
 
-    // Mark session connected on SSE open (handles reconnects from stale/disconnected)
     store.markSessionConnected(sessionId);
+    log.info({ event: "sse_open", agentId, sessionId }, "SSE stream opening");
 
     return new Response(
       new ReadableStream({
@@ -444,27 +447,27 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
             write(data: string) {
               try {
                 controller.enqueue(encoder.encode(data));
-              } catch {
+              } catch (e) {
+                log.warn({ event: "sse_write_fail", agentId, sessionId, err: String(e) }, "SSE write failed");
                 emitter.unregister(agentId, sessionId!);
               }
             },
             close() {
+              log.info({ event: "sse_writer_close", agentId, sessionId }, "SSE writer closed");
               try { controller.close(); } catch {}
             },
           };
 
           emitter.register(agentId, sessionId!, writer);
-
-          // Send keepalive comment
           writer.write(": connected\n\n");
 
-          // Replay backlog
+          const session = store.getSession(sessionId!);
+          const replaySeq = session?.last_ack_seq ?? 0;
+          log.info({ event: "sse_replay", agentId, sessionId, fromSeq: replaySeq }, "SSE replaying backlog");
           router.replay(agentId, sessionId!);
 
-          // SSE socket closed → unregister writer only.
-          // Status transitions are handled by the reconciler (heartbeat timeout)
-          // or explicit disconnect endpoint. No status change here.
           c.req.raw.signal.addEventListener("abort", () => {
+            log.info({ event: "sse_abort", agentId, sessionId }, "SSE client disconnected");
             emitter.unregister(agentId, sessionId!);
           });
         },
