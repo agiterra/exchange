@@ -337,7 +337,7 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
     const body = await c.req.json();
 
-    // Clean up stale/disconnected sessions for same cc_session_id (reconnect dedup)
+    // Close existing connected sessions for same cc_session_id (reconnect dedup)
     if (body.cc_session_id) {
       const oldSessions = store.getSessionsByCCSession(agentId, body.cc_session_id);
       for (const old of oldSessions) {

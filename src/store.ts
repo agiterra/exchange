@@ -379,7 +379,7 @@ export class Store {
     const now = Date.now();
     this.db.prepare(`
       INSERT INTO agent_sessions (id, agent_id, runtime, connected_at, last_ack_seq, updated_at, last_heartbeat, status, cc_session_id)
-      VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(last_ack_seq), 0) FROM agent_sessions WHERE agent_id = ?), ?, ?, 'connected', ?)
+      VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(last_ack_seq), (SELECT MAX(seq) FROM messages)) FROM agent_sessions WHERE agent_id = ?), ?, ?, 'connected', ?)
     `).run(id, agentId, runtime, now, agentId, now, now, contextId ?? null);
     return this.getSession(id)!;
   }
