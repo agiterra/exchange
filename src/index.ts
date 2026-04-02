@@ -27,6 +27,15 @@ const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "300000", 10); /
 
 export const log = pino({ name: "wire" });
 
+process.on("unhandledRejection", (err) => {
+  log.error({ event: "unhandled_rejection", err }, "unhandled promise rejection");
+});
+
+process.on("uncaughtException", (err) => {
+  log.fatal({ event: "uncaught_exception", err }, "uncaught exception");
+  process.exit(1);
+});
+
 const store = new Store(dbPath);
 const emitter = new MessageEmitter();
 const router = new Router(store, emitter, log);

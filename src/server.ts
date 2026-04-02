@@ -145,6 +145,12 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
 
   app.use("*", cors());
 
+  // Global error handler — log and return 500
+  app.onError((err, c) => {
+    log.error({ event: "unhandled_error", method: c.req.method, path: c.req.path, err: { message: err.message, stack: err.stack } }, "unhandled error");
+    return c.json({ error: "internal server error", detail: err.message }, 500);
+  });
+
   // Cache raw body text so signature verification works after c.req.json()
   app.use("*", async (c, next) => {
     if (c.req.method === "POST" || c.req.method === "PUT" || c.req.method === "DELETE") {
