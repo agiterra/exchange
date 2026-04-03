@@ -147,6 +147,7 @@ export type Agent = {
   created_at: number;
   last_seen_at: number | null;
   plan: string | null;
+  pronouns: string | null;
 };
 
 export type SessionStatus = "connected" | "stale" | "disconnected";
@@ -271,6 +272,12 @@ export class Store {
       this.db.exec("ALTER TABLE webhooks ADD COLUMN dedup TEXT");
     }
 
+    // Add pronouns column to agents
+    const agentCols3 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!agentCols3.some((c) => c.name === "pronouns")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN pronouns TEXT");
+    }
+
     // Index source_id on messages for dedup lookups
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_messages_source_id ON messages(source_id)");
   }
@@ -340,18 +347,19 @@ export class Store {
     return this.db.prepare("SELECT * FROM agents WHERE reaped_at IS NULL").all() as Agent[];
   }
 
-  upsertAgent(agent: { id: string; display_name: string; pubkey: string; permanent?: boolean }): void {
+  upsertAgent(agent: { id: string; display_name: string; pubkey: string; permanent?: boolean; pronouns?: string }): void {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO agents (id, display_name, pubkey, permanent, created_at, last_seen_at, reaped_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL)
+      INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, created_at, last_seen_at, reaped_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
       ON CONFLICT(id) DO UPDATE SET
         display_name = excluded.display_name,
         pubkey = excluded.pubkey,
         permanent = CASE WHEN excluded.permanent = 1 THEN 1 ELSE agents.permanent END,
+        pronouns = COALESCE(excluded.pronouns, agents.pronouns),
         last_seen_at = excluded.last_seen_at,
         reaped_at = NULL
-    `).run(agent.id, agent.display_name, agent.pubkey, agent.permanent ? 1 : 0, now, now);
+    `).run(agent.id, agent.display_name, agent.pubkey, agent.permanent ? 1 : 0, agent.pronouns ?? null, now, now);
   }
 
   isPermanent(agentId: string): boolean {
