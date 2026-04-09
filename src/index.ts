@@ -16,6 +16,7 @@ import { Store } from "./store.js";
 import { Router } from "./router.js";
 import { MessageEmitter } from "./emitter.js";
 import { createServer, runCleanup } from "./server.js";
+import { HeartbeatScheduler } from "./heartbeat.js";
 
 const port = parseInt(process.env.WIRE_PORT ?? "9800", 10);
 const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
@@ -39,7 +40,9 @@ process.on("uncaughtException", (err) => {
 const store = new Store(dbPath);
 const emitter = new MessageEmitter();
 const router = new Router(store, emitter, log);
-const server = createServer({ port, store, router, emitter, log });
+const heartbeats = new HeartbeatScheduler(store, router, log);
+const server = createServer({ port, store, router, emitter, log, heartbeats });
+heartbeats.start();
 
 // Session reconciler — update status based on heartbeat age
 setInterval(() => {

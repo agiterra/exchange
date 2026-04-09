@@ -112,6 +112,18 @@ CREATE TABLE IF NOT EXISTS passkey_credentials (
     created_at      INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS heartbeats (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    cron            TEXT NOT NULL,
+    prompt          TEXT NOT NULL,
+    created_by      TEXT NOT NULL,
+    active          INTEGER NOT NULL DEFAULT 1,
+    last_fired      INTEGER,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_heartbeats_agent ON heartbeats(agent_id);
+
 CREATE TABLE IF NOT EXISTS challenges (
     id              TEXT PRIMARY KEY,
     challenge       TEXT NOT NULL,
@@ -180,6 +192,17 @@ export type Webhook = {
   created_at: number;
 };
 
+
+export type Heartbeat = {
+  id: string;
+  agent_id: string;
+  cron: string;
+  prompt: string;
+  created_by: string;
+  active: number;
+  last_fired: number | null;
+  created_at: number;
+};
 
 export class Store {
   private db: Database;
@@ -726,6 +749,60 @@ export class Store {
       "SELECT operator_id FROM operator_sessions WHERE id = ? AND expires_at > ?"
     ).get(sessionId, Date.now()) as { operator_id: string } | null;
     return row ?? null;
+  }
+
+  // --- Heartbeats ---
+
+  createHeartbeat(opts: {
+    id: string;
+    agent_id: string;
+    cron: string;
+    prompt: string;
+    created_by: string;
+  }): Heartbeat {
+    const now = Date.now();
+    this.db.prepare(
+      `INSERT INTO heartbeats (id, agent_id, cron, prompt, created_by, active, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?)`
+    ).run(opts.id, opts.agent_id, opts.cron, opts.prompt, opts.created_by, now);
+    return {
+      id: opts.id, agent_id: opts.agent_id, cron: opts.cron,
+      prompt: opts.prompt, created_by: opts.created_by,
+      active: 1, last_fired: null, created_at: now,
+    };
+  }
+
+  getHeartbeat(id: string): Heartbeat | null {
+    return this.db.prepare("SELECT * FROM heartbeats WHERE id = ?").get(id) as Heartbeat | null;
+  }
+
+  listHeartbeats(agentId?: string): Heartbeat[] {
+    if (agentId) {
+      return this.db.prepare(
+        "SELECT * FROM heartbeats WHERE agent_id = ? ORDER BY created_at"
+      ).all(agentId) as Heartbeat[];
+    }
+    return this.db.prepare("SELECT * FROM heartbeats ORDER BY created_at").all() as Heartbeat[];
+  }
+
+  listActiveHeartbeats(): Heartbeat[] {
+    return this.db.prepare(
+      "SELECT * FROM heartbeats WHERE active = 1 ORDER BY created_at"
+    ).all() as Heartbeat[];
+  }
+
+  updateHeartbeatFired(id: string): void {
+    this.db.prepare(
+      "UPDATE heartbeats SET last_fired = ? WHERE id = ?"
+    ).run(Date.now(), id);
+  }
+
+  deleteHeartbeat(id: string): void {
+    this.db.prepare("DELETE FROM heartbeats WHERE id = ?").run(id);
+  }
+
+  deleteHeartbeatsForAgent(agentId: string): void {
+    this.db.prepare("DELETE FROM heartbeats WHERE agent_id = ?").run(agentId);
   }
 
   close(): void {

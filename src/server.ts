@@ -75,6 +75,7 @@ type ServerDeps = {
   router: Router;
   emitter: MessageEmitter;
   log: Logger;
+  heartbeats: import("./heartbeat.js").HeartbeatScheduler;
 };
 
 // --- JWT verification ---
@@ -143,7 +144,7 @@ export async function runCleanup(
   await fn(ctx.meta, ctx.secrets, fetch);
 }
 
-export function createServer({ port, store, router, emitter, log }: ServerDeps) {
+export function createServer({ port, store, router, emitter, log, heartbeats }: ServerDeps) {
   _serverLog = log;
   const app = new Hono();
 
@@ -815,6 +816,40 @@ export function createServer({ port, store, router, emitter, log }: ServerDeps) 
     const plugin = c.req.param("plugin");
 
     return handleWebhook(c, agentId, plugin, null);
+  });
+
+  // --- Scheduled Heartbeats ---
+
+  app.post("/heartbeats", async (c) => {
+    const body = await c.req.json() as {
+      agent_id: string;
+      cron: string;
+      prompt: string;
+      created_by?: string;
+    };
+    if (!body.agent_id || !body.cron || !body.prompt) {
+      return c.json({ error: "agent_id, cron, and prompt are required" }, 400);
+    }
+    const createdBy = body.created_by ?? "system";
+    const hb = heartbeats.add({
+      agent_id: body.agent_id,
+      cron: body.cron,
+      prompt: body.prompt,
+      created_by: createdBy,
+    });
+    log.info({ event: "heartbeat_created", id: hb.id, agent: body.agent_id, cron: body.cron }, "heartbeat created");
+    return c.json(hb);
+  });
+
+  app.get("/heartbeats", (c) => {
+    const agentId = c.req.query("agent_id");
+    return c.json(store.listHeartbeats(agentId ?? undefined));
+  });
+
+  app.delete("/heartbeats/:id", (c) => {
+    const id = c.req.param("id");
+    heartbeats.remove(id);
+    return c.json({ deleted: id });
   });
 
   // --- Dashboard ---

@@ -7,32 +7,25 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   const agentRows = agents.map((a: any) => {
     const status = a.online ? "●" : "○";
     const statusColor = a.online ? "#4ade80" : "#6b7280";
-    const planFull = a.plan ? esc(a.plan) : "";
     const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : "never";
     const typeBadge = a.permanent
       ? '<span class="badge badge-personai">personai</span>'
       : '<span class="badge badge-ephemeral">ephemeral</span>';
     const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + "…" : "—";
     return `
-      <tr class="agent-row" onclick="this.classList.toggle('expanded')">
+      <tr class="agent-row">
         <td><span style="color:${statusColor}">${status}</span></td>
-        <td class="agent-name">${esc(a.display_name)}</td>
+        <td class="agent-name copyable" onclick="copy('${esc(a.id)}',this)" title="Click to copy id">${esc(a.display_name)}</td>
         <td class="badge-cell">${typeBadge}</td>
-        <td class="plan"><span class="plan-text">${planFull || "—"}</span></td>
-      </tr>
-      <tr class="agent-detail">
-        <td></td>
-        <td colspan="3" class="detail-content">
-          <span class="detail-field">id:</span> <span class="copyable" onclick="copy('${esc(a.id)}',this)" title="Click to copy">${esc(a.id)}</span>
-          <span class="detail-sep">·</span>
-          <span class="detail-field">sessions:</span> ${a.sessions}
-          <span class="detail-sep">·</span>
-          <span class="detail-field">pubkey:</span> <span class="copyable" onclick="copy('${esc(a.pubkey)}',this)" title="Click to copy full key">${pubkeyShort}</span>
-          <span class="detail-sep">·</span>
-          <span class="detail-field">seen:</span> ${lastSeen}
-          <div class="detail-plan">${planFull || ""}</div>
+        <td class="dim copyable" onclick="copy('${esc(a.pubkey)}',this)" title="Click to copy full key">${pubkeyShort}</td>
+        <td class="dim">${a.sessions}</td>
+        <td class="dim">${lastSeen}</td>
+        <td class="agent-actions">
+          <button data-peek="${esc(a.id)}" title="Read agent's screen output">peek</button>
+          <button data-msg="${esc(a.id)}" title="Send IPC message to agent">msg</button>
         </td>
-      </tr>`;
+      </tr>
+      <tr><td colspan="7" class="agent-plan" data-plan-for="${esc(a.id)}">${a.plan ? esc(a.plan) : ""}</td></tr>`;
   }).join("\n");
 
   return `<!DOCTYPE html>
@@ -42,6 +35,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>The Wire</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M18 4L10 18h5l-2 10 10-14h-5z' fill='%23fbbf24'/></svg>">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -96,36 +90,41 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .badge-ephemeral { background: #3f3f00; color: #facc15; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     col.col-status { width: 24px; }
-    col.col-name { width: 150px; }
+    col.col-name { width: 130px; }
     col.col-type { width: 80px; }
-    col.col-plan { }
+    col.col-key { width: 100px; }
+    col.col-sessions { width: 70px; }
+    col.col-seen { }
+    col.col-actions { width: 100px; }
     .badge-cell { white-space: nowrap; }
     td, th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    td:last-child { white-space: nowrap; }
-    .plan { color: #a1a1aa; overflow: hidden; }
-    .plan-text {
-      display: block;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .agent-detail { display: none; }
-    .agent-row.expanded + .agent-detail { display: table-row; }
-    .detail-content {
-      padding: 4px 12px 12px 0;
-      color: #6b7280;
-      font-size: 0.85em;
-      white-space: normal;
-      border-bottom: 1px solid #1f1f1f;
-    }
-    .detail-field { color: #525252; }
-    .detail-sep { color: #333; margin: 0 4px; }
-    .detail-plan {
-      margin-top: 6px;
+    th { color: #525252; font-weight: 400; font-size: 11px; text-align: left; }
+    .agent-plan {
+      padding: 2px 0 8px 28px;
       color: #a1a1aa;
-      white-space: pre-wrap;
-      line-height: 1.4;
+      line-height: 1.5;
     }
+    .agent-plan:empty { display: none; }
+    .agent-plan h1, .agent-plan h2, .agent-plan h3 { color: #e5e5e5; margin: 8px 0 4px; font-size: 0.9em; }
+    .agent-plan h1 { font-size: 1em; }
+    .agent-plan p { margin: 2px 0; }
+    .agent-plan a { color: #60a5fa; text-decoration: none; }
+    .agent-plan a:hover { text-decoration: underline; }
+    .agent-plan code { background: #1a1a2e; color: #c4b5fd; padding: 1px 4px; border-radius: 3px; font-size: 0.9em; }
+    .agent-plan strong { color: #e5e5e5; }
+    .agent-plan em { color: #d4d4d8; }
+    .agent-plan del { color: #6b7280; }
+    .agent-plan ul, .agent-plan ol { margin: 2px 0 2px 20px; }
+    .agent-plan li { margin: 1px 0; }
+    .agent-actions { white-space: nowrap; }
+    .agent-actions button { padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; }
+    .agent-actions button:hover { background: #2a2a3e; color: #e5e5e5; border-color: #555; }
+    .peek-output { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-top: 4px; white-space: pre-wrap; font-size: 11px; color: #a1a1aa; max-height: 400px; overflow-y: auto; }
+    .peek-output .peek-header { color: #fbbf24; margin-bottom: 8px; font-weight: bold; }
+    .agent-plan table { border-collapse: collapse; margin: 4px 0; width: auto; }
+    .agent-plan th, .agent-plan td { border: 1px solid #2a2a2a; padding: 3px 8px; text-align: left; white-space: normal; overflow: visible; }
+    .agent-plan th { color: #e5e5e5; background: #1a1a1a; font-size: 0.9em; }
+    .agent-plan td { color: #a1a1aa; }
     .dim { color: #525252; }
     .copyable { cursor: pointer; position: relative; }
     .copyable:hover { text-decoration: underline; }
@@ -236,8 +235,9 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .msg-arrow { color: #3f3f46; flex-shrink: 0; }
     .msg-dest { color: #a78bfa; min-width: 80px; flex-shrink: 0; }
     .msg-delivery { font-size: 11px; flex-shrink: 0; }
-    .msg-delivery .ok { color: #4ade80; }
-    .msg-delivery .skip { color: #f87171; }
+    .msg-delivery .uni { color: #4ade80; }
+    .msg-delivery .broad { color: #4ade80; }
+    .msg-delivery .fail { color: #f87171; }
     .msg-snippet { color: #3f3f46; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .msg-detail {
       display: none;
@@ -306,14 +306,20 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       <col class="col-status">
       <col class="col-name">
       <col class="col-type">
-      <col class="col-plan">
+      <col class="col-key">
+      <col class="col-sessions">
+      <col class="col-seen">
+      <col class="col-actions">
     </colgroup>
     <thead>
       <tr>
         <th></th>
         <th>Agent</th>
         <th>Type</th>
-        <th>Plan</th>
+        <th>Key</th>
+        <th>Sessions</th>
+        <th>Seen</th>
+        <th></th>
       </tr>
     </thead>
     <tbody>
@@ -367,44 +373,38 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
       // Update table body — preserve expanded state
       const tbody = document.querySelector('tbody');
-      const expandedIds = new Set();
-      tbody.querySelectorAll('.agent-row.expanded').forEach(el => {
-        const id = el.getAttribute('data-agent');
-        if (id) expandedIds.add(id);
-      });
       tbody.innerHTML = agents.map(a => {
         const status = a.online ? '●' : '○';
         const statusColor = a.online ? '#4ade80' : '#6b7280';
-        const planFull = a.plan ? esc(a.plan) : '';
         const lastSeen = a.last_seen_at ? new Date(a.last_seen_at).toLocaleString() : 'never';
         const typeBadge = a.permanent
           ? '<span class="badge badge-personai">personai</span>'
           : '<span class="badge badge-ephemeral">ephemeral</span>';
         const pubkeyShort = a.pubkey ? a.pubkey.slice(0, 8) + '…' : '—';
-        const expanded = expandedIds.has(a.id) ? ' expanded' : '';
-        return '<tr class="agent-row' + expanded + '" data-agent="' + esc(a.id) + '" onclick="this.classList.toggle(&quot;expanded&quot;)">' +
+        return '<tr class="agent-row" data-agent="' + esc(a.id) + '">' +
           '<td><span style="color:' + statusColor + '">' + status + '</span></td>' +
-          '<td class="agent-name">' + esc(a.display_name) + '</td>' +
+          '<td class="agent-name copyable" data-copy="' + esc(a.id) + '" title="Click to copy id">' + esc(a.display_name) + '</td>' +
           '<td class="badge-cell">' + typeBadge + '</td>' +
-          '<td class="plan"><span class="plan-text">' + (planFull || '—') + '</span></td>' +
+          '<td class="dim copyable" data-copy="' + esc(a.pubkey) + '" title="Click to copy full key">' + pubkeyShort + '</td>' +
+          '<td class="dim">' + a.sessions + '</td>' +
+          '<td class="dim">' + lastSeen + '</td>' +
+          '<td class="agent-actions">' +
+            '<button data-peek="' + esc(a.id) + '" title="Read agent screen output">peek</button>' +
+            '<button data-msg="' + esc(a.id) + '" title="Send IPC message to agent">msg</button>' +
+          '</td>' +
           '</tr>' +
-          '<tr class="agent-detail">' +
-          '<td></td>' +
-          '<td colspan="3" class="detail-content">' +
-          '<span class="detail-field">id:</span> <span class="copyable" data-copy="' + esc(a.id) + '" onclick="event.stopPropagation()">' + esc(a.id) + '</span>' +
-          '<span class="detail-sep">·</span>' +
-          '<span class="detail-field">sessions:</span> ' + a.sessions +
-          '<span class="detail-sep">·</span>' +
-          '<span class="detail-field">pubkey:</span> <span class="copyable" data-copy="' + esc(a.pubkey) + '" onclick="event.stopPropagation()">' + pubkeyShort + '</span>' +
-          '<span class="detail-sep">·</span>' +
-          '<span class="detail-field">seen:</span> ' + lastSeen +
-          '<div class="detail-plan">' + (planFull || '') + '</div>' +
-          '</td></tr>';
+          '<tr><td colspan="7" class="agent-plan" data-plan-for="' + esc(a.id) + '">' + renderPlan(a.plan || '') + '</td></tr>';
       }).join('');
 
-      // Re-bind click handlers via delegation
+      // Bind handlers
       tbody.querySelectorAll('[data-copy]').forEach(el => {
         el.onclick = (e) => { e.stopPropagation(); copy(el.dataset.copy, el); };
+      });
+      tbody.querySelectorAll('[data-peek]').forEach(el => {
+        el.onclick = (e) => { e.stopPropagation(); peek(el.dataset.peek); };
+      });
+      tbody.querySelectorAll('[data-msg]').forEach(el => {
+        el.onclick = (e) => { e.stopPropagation(); promptSend(el.dataset.msg); };
       });
     };
 
@@ -414,9 +414,22 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const log = document.getElementById('message-log');
       const d = new Date(msg.created_at);
       const ts = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString();
-      const deliveryBadges = (msg.deliveries || []).map(d =>
-        '<span class="' + (d.status === 'delivered' ? 'ok' : 'skip') + '">' + esc(d.agentId) + '</span>'
-      ).join(' ');
+      const deliveries = msg.deliveries || [];
+      const okCount = deliveries.filter(d => d.status === 'delivered').length;
+      const failCount = deliveries.length - okCount;
+      let deliveryBadges = '';
+      if (msg.dest) {
+        // Unicast — just show delivery status
+        deliveryBadges = failCount > 0
+          ? '<span class="fail">x</span>'
+          : (okCount > 0 ? '<span class="uni">ok</span>' : '');
+      } else {
+        // Broadcast — show delivery count
+        deliveryBadges = okCount > 0
+          ? '<span class="broad">*' + okCount + '</span>'
+          : '';
+        if (failCount > 0) deliveryBadges += ' <span class="fail">x' + failCount + '</span>';
+      }
 
       // Unwrap stringified JSON
       let parsed = msg.content;
@@ -488,6 +501,24 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     function esc(s) {
       return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : '';
     }
+
+    function renderPlan(src) {
+      if (!src) return '';
+      return marked.parse(src, { breaks: true });
+    }
+
+    document.querySelectorAll('.agent-plan').forEach(function(el) {
+      var raw = el.textContent;
+      el.innerHTML = renderPlan(raw);
+    });
+
+    // Bind initial peek/msg buttons
+    document.querySelectorAll('[data-peek]').forEach(function(el) {
+      el.onclick = function(e) { e.stopPropagation(); peek(el.dataset.peek); };
+    });
+    document.querySelectorAll('[data-msg]').forEach(function(el) {
+      el.onclick = function(e) { e.stopPropagation(); promptSend(el.dataset.msg); };
+    });
 
     function renderJson(val, depth) {
       const frag = document.createDocumentFragment();
@@ -619,6 +650,52 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
 
 
+    async function peek(agentId) {
+      // Remove any existing peek output
+      const existing = document.getElementById('peek-' + agentId);
+      if (existing) { existing.remove(); return; }
+
+      const res = await fetch('/agents/' + encodeURIComponent(agentId) + '/peek');
+      const data = await res.json();
+
+      // Find the plan row for this agent and insert peek output after it
+      const planCell = document.querySelector('[data-plan-for="' + agentId + '"]');
+      if (!planCell) return;
+
+      const row = document.createElement('tr');
+      row.id = 'peek-' + agentId;
+      const cell = document.createElement('td');
+      cell.colSpan = 7;
+      cell.className = 'peek-output';
+
+      if (res.ok) {
+        cell.innerHTML = '<div class="peek-header">' + esc(agentId) + ' screen output</div>' + esc(data.output || '(empty)');
+      } else {
+        cell.style.color = '#f87171';
+        cell.textContent = 'peek failed: ' + (data.error || res.status) + (data.detail ? ' — ' + data.detail : '');
+      }
+
+      row.appendChild(cell);
+      planCell.closest('tr').insertAdjacentElement('afterend', row);
+    }
+
+    async function promptSend(agentId) {
+      const msg = prompt('Message to ' + agentId + ':');
+      if (!msg) return;
+
+      const res = await fetch('/agents/' + encodeURIComponent(agentId) + '/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        // Intentionally using alert here — operator action, not automated
+        window.alert('Send failed: ' + (data.error || res.status));
+      }
+    }
+
     async function registerAgent() {
       const id = document.getElementById('new-agent-id').value.trim();
       const name = document.getElementById('new-agent-name').value.trim();
@@ -630,7 +707,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const res = await fetch('/agents/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, display_name: name, pubkey }),
+        body: JSON.stringify({ id, display_name: name, pubkey, permanent: true }),
       });
 
       if (res.ok) {
