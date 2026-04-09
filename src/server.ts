@@ -818,6 +818,46 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     return handleWebhook(c, agentId, plugin, null);
   });
 
+  // --- Broadcast (no dest — delivers to all agents) ---
+
+  app.post("/broadcast/:topic", async (c) => {
+    const topic = c.req.param("topic");
+    const rawBody = (c as any).get("rawBody") ?? await c.req.text();
+    const headers: Record<string, string> = {};
+    c.req.raw.headers.forEach((v, k) => { headers[k] = v; });
+
+    let source: string;
+    try {
+      const { sender } = await verifyJwt(headers, rawBody, store);
+      source = sender;
+    } catch (e) {
+      return c.json({ error: "broadcast auth failed", detail: String(e) }, 401);
+    }
+
+    let parsedBody: unknown;
+    try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = rawBody; }
+
+    const envelope = {
+      source,
+      topic: `webhook.${topic}`,
+      plugin: topic,
+      headers,
+      payload: parsedBody,
+    };
+
+    const { message, deliveries } = router.route({
+      source,
+      topic: `webhook.${topic}`,
+      payload: JSON.stringify(envelope),
+      raw: rawBody,
+    });
+
+    return c.json({
+      seq: message.seq,
+      delivered_to: deliveries,
+    });
+  });
+
   // --- Scheduled Heartbeats ---
 
   app.post("/heartbeats", async (c) => {
