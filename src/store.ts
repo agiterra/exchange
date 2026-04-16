@@ -348,15 +348,23 @@ export class Store {
     ).all(sinceSeq, limit) as Message[];
   }
 
-  getRecentMessagesByCount(limit = 50): Message[] {
+  getRecentMessagesByCount(limit = 50, topic?: string): Message[] {
+    if (topic) {
+      return this.db.prepare(
+        "SELECT * FROM (SELECT * FROM messages WHERE topic = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+      ).all(topic, limit) as Message[];
+    }
     return this.db.prepare(
       "SELECT * FROM (SELECT * FROM messages ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
     ).all(limit) as Message[];
   }
 
   getMessagesForAgent(agentId: string, sinceSeq: number, limit = 100): Message[] {
+    // Include broadcasts (dest IS NULL) so replay delivers every message the
+    // agent would have received live. Without this, agents that reconnect after
+    // a broadcast was sent silently miss it.
     return this.db.prepare(
-      "SELECT * FROM messages WHERE seq > ? AND dest = ? ORDER BY seq ASC LIMIT ?"
+      "SELECT * FROM messages WHERE seq > ? AND (dest = ? OR dest IS NULL) ORDER BY seq ASC LIMIT ?"
     ).all(sinceSeq, agentId, limit) as Message[];
   }
 

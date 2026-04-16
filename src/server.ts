@@ -926,7 +926,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       return c.json({ error: "unauthorized" }, 401);
     }
     const limit = parseInt(c.req.query("limit") ?? "50", 10);
-    const messages = store.getRecentMessagesByCount(limit).map((msg) => {
+    const messages = store.getRecentMessagesByCount(limit, "ipc").map((msg) => {
       let content: unknown;
       try {
         const envelope = JSON.parse(msg.payload);
@@ -978,6 +978,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
           // Live message log (backfill handled client-side via /messages/recent)
           const unsubRoute = router.onRoute((msg, deliveries) => {
+            if (msg.topic !== "ipc") return;
             let content: unknown;
             try {
               const envelope = JSON.parse(msg.payload);
