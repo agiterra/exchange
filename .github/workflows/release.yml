@@ -1,0 +1,66 @@
+name: release
+
+# On every tag (v*), build Wire binaries for the four supported targets
+# and attach them to the auto-created GitHub Release. The install.sh
+# script (and anyone doing a manual install) downloads from here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install deps
+        run: bun install --frozen-lockfile || bun install
+
+      - name: Compile all targets
+        run: bash scripts/build-binaries.sh
+
+      - name: Compute sha256 checksums
+        run: |
+          cd dist
+          shasum -a 256 wire-*.zip wire-* | awk '!/\.zip\.|sha256/' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/wire-darwin-arm64.zip
+            dist/wire-darwin-x64.zip
+            dist/wire-linux-arm64.zip
+            dist/wire-linux-x64.zip
+            dist/wire-darwin-arm64
+            dist/wire-darwin-x64
+            dist/wire-linux-arm64
+            dist/wire-linux-x64
+            dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            Wire release ${{ github.ref_name }}.
+
+            **Install (one-liner):**
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/agiterra/wire/main/scripts/install.sh | bash
+            ```
+
+            The installer auto-detects your platform, downloads the
+            right binary from this release, writes a launchd unit
+            (macOS) or systemd user unit (Linux), and starts the
+            service.
+
+            **Manual install:** download the `wire-<platform>.zip`
+            for your OS, unzip, chmod +x, and run. Config lives at
+            `~/.wire/.env` — see the repo README.
