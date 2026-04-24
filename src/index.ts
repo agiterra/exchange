@@ -17,6 +17,19 @@ import { Router } from "./router.js";
 import { MessageEmitter } from "./emitter.js";
 import { createServer, runCleanup } from "./server.js";
 import { HeartbeatScheduler } from "./heartbeat.js";
+import { runCli } from "./cli.js";
+import { loadOrCreateServerIdentity } from "./identity.js";
+
+// CLI dispatch. Non-serve commands (peer add/list/remove/update-url,
+// version, pubkey) exit here without starting the server. The -1
+// sentinel means "continue into the normal server startup below."
+const cliArgv = process.argv.slice(2);
+const cliResult = await runCli(cliArgv);
+if (cliResult.exit !== -1) {
+  if (cliResult.stdout) process.stdout.write(cliResult.stdout);
+  if (cliResult.stderr) process.stderr.write(cliResult.stderr);
+  process.exit(cliResult.exit);
+}
 
 const port = parseInt(process.env.WIRE_PORT ?? "9800", 10);
 const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
@@ -41,6 +54,12 @@ const store = new Store(dbPath);
 const emitter = new MessageEmitter();
 const router = new Router(store, emitter, log);
 const heartbeats = new HeartbeatScheduler(store, router, log);
+
+// Server identity — Ed25519 keypair for peer-to-peer federation (v1.1.0).
+// Generated on first boot; pubkey is what you paste when peering.
+const serverIdentity = await loadOrCreateServerIdentity();
+log.info({ event: "server_identity", pubkey: serverIdentity.pubkeyB64 }, "server identity loaded");
+
 const server = createServer({ port, store, router, emitter, log, heartbeats });
 heartbeats.start();
 
