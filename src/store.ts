@@ -137,6 +137,22 @@ CREATE TABLE IF NOT EXISTS operator_sessions (
     expires_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_operator_sessions_operator ON operator_sessions(operator_id);
+
+-- Peers table (v1.1.0 federation). Each Wire keeps a local list of
+-- peer instances it knows how to forward messages to. There is no
+-- central registry — pair peers by running 'wire peer add' on both
+-- sides with the other's base_url + server pubkey (output of
+-- 'wire peer pubkey'). Pubkeys are stable; base_url may rotate when
+-- ngrok tunnels restart (update via 'wire peer update-url').
+CREATE TABLE IF NOT EXISTS peers (
+    name            TEXT PRIMARY KEY,        -- user alias ('home-mini')
+    base_url        TEXT NOT NULL,           -- 'https://random.ngrok.app'
+    pubkey          TEXT NOT NULL,           -- base64 Ed25519 pubkey of the peer Wire
+    added_at        INTEGER NOT NULL,
+    last_seen       INTEGER,
+    notes           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_peers_pubkey ON peers(pubkey);
 `;
 
 export type Message = {
@@ -202,6 +218,15 @@ export type Heartbeat = {
   active: number;
   last_fired: number | null;
   created_at: number;
+};
+
+export type Peer = {
+  name: string;
+  base_url: string;
+  pubkey: string;
+  added_at: number;
+  last_seen: number | null;
+  notes: string | null;
 };
 
 export class Store {
@@ -811,6 +836,47 @@ export class Store {
 
   deleteHeartbeatsForAgent(agentId: string): void {
     this.db.prepare("DELETE FROM heartbeats WHERE agent_id = ?").run(agentId);
+  }
+
+  // --- Peers (v1.1.0 federation) ---
+
+  createPeer(opts: { name: string; base_url: string; pubkey: string; notes?: string }): Peer {
+    const now = Date.now();
+    this.db.prepare(
+      "INSERT INTO peers (name, base_url, pubkey, added_at, last_seen, notes) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(opts.name, opts.base_url, opts.pubkey, now, null, opts.notes ?? null);
+    return {
+      name: opts.name,
+      base_url: opts.base_url,
+      pubkey: opts.pubkey,
+      added_at: now,
+      last_seen: null,
+      notes: opts.notes ?? null,
+    };
+  }
+
+  getPeer(name: string): Peer | null {
+    return this.db.prepare("SELECT * FROM peers WHERE name = ?").get(name) as Peer | null;
+  }
+
+  getPeerByPubkey(pubkey: string): Peer | null {
+    return this.db.prepare("SELECT * FROM peers WHERE pubkey = ?").get(pubkey) as Peer | null;
+  }
+
+  listPeers(): Peer[] {
+    return this.db.prepare("SELECT * FROM peers ORDER BY name").all() as Peer[];
+  }
+
+  deletePeer(name: string): void {
+    this.db.prepare("DELETE FROM peers WHERE name = ?").run(name);
+  }
+
+  updatePeerUrl(name: string, base_url: string): void {
+    this.db.prepare("UPDATE peers SET base_url = ? WHERE name = ?").run(base_url, name);
+  }
+
+  updatePeerLastSeen(name: string, ts: number): void {
+    this.db.prepare("UPDATE peers SET last_seen = ? WHERE name = ?").run(ts, name);
   }
 
   close(): void {
