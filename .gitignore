@@ -1,1 +1,4 @@
 node_modules/
+
+# Compiled release artifacts (produced by scripts/build-binaries.sh)
+dist/
