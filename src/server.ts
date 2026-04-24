@@ -280,6 +280,48 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     return c.json({ status: "ok", ts: Date.now() });
   });
 
+  // --- Federation (v1.1.0) ---
+  // GET /peers/agents/:id  — unauthenticated existence probe. Returns
+  //   200 if the agent is locally registered, 404 otherwise. Peers call
+  //   this to decide whether to forward a message to us.
+  app.get("/peers/agents/:id", (c) => {
+    const id = c.req.param("id");
+    const agent = store.getAgent(id);
+    if (agent) return c.json({ ok: true, id });
+    return c.json({ ok: false, id }, 404);
+  });
+
+  // POST /peers/forward  — accept a message forwarded by a peer Wire.
+  //   Authorization: Bearer <outer-JWT> signed by the peer's server
+  //   identity. Body is the original envelope exactly as the peer's
+  //   router stored it. We verify the JWT, then call router.route so
+  //   the message lands in our own store + reaches the local agent.
+  app.post("/peers/forward", async (c) => {
+    const auth = c.req.header("authorization") ?? "";
+    const jwt = auth.replace(/^Bearer /, "");
+    if (!jwt) return c.json({ error: "missing Bearer JWT" }, 401);
+    const body = (c as any).get("rawBody") ?? await c.req.text();
+    try {
+      const { verifyForwardedJwt } = await import("./federation.js");
+      const { peer, envelope } = await verifyForwardedJwt(jwt, body, store);
+      // Route through normal pipeline so local storage + delivery both happen.
+      const { message, deliveries } = router.route({
+        source: envelope.source,
+        source_id: envelope.source_id ?? undefined,
+        source_cc_session: envelope.source_cc_session ?? undefined,
+        dest: envelope.dest,
+        dest_cc_session: envelope.dest_cc_session ?? undefined,
+        topic: envelope.topic,
+        payload: envelope.payload,
+        raw: envelope.raw ?? undefined,
+      });
+      store.updatePeerLastSeen(peer.name, Date.now());
+      return c.json({ seq: message.seq, delivered_to: deliveries, forwarded_by: peer.name });
+    } catch (e) {
+      return c.json({ error: "peer forward rejected", detail: (e as Error).message }, 401);
+    }
+  });
+
   // --- Agent Registry ---
 
   app.get("/agents", (c) => {

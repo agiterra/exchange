@@ -52,13 +52,19 @@ process.on("uncaughtException", (err) => {
 
 const store = new Store(dbPath);
 const emitter = new MessageEmitter();
-const router = new Router(store, emitter, log);
-const heartbeats = new HeartbeatScheduler(store, router, log);
 
 // Server identity — Ed25519 keypair for peer-to-peer federation (v1.1.0).
 // Generated on first boot; pubkey is what you paste when peering.
 const serverIdentity = await loadOrCreateServerIdentity();
 log.info({ event: "server_identity", pubkey: serverIdentity.pubkeyB64 }, "server identity loaded");
+
+// Our peer name in outgoing JWTs — defaults to hostname but can be
+// overridden via WIRE_PEER_NAME so two Wires on the same hostname
+// can coexist (dev / test / CI).
+const ourPeerName = (process.env.WIRE_PEER_NAME ?? "").trim() || require("os").hostname().toLowerCase();
+
+const router = new Router(store, emitter, log, { ourPeerName, identity: serverIdentity });
+const heartbeats = new HeartbeatScheduler(store, router, log);
 
 const server = createServer({ port, store, router, emitter, log, heartbeats });
 heartbeats.start();

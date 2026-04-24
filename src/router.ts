@@ -9,10 +9,24 @@
 import type { Logger } from "pino";
 import type { Store, Message } from "./store.js";
 import type { MessageEmitter } from "./emitter.js";
+import type { ServerIdentity } from "./identity.js";
+import { findPeerForAgent, forwardToPeer, type ForwardedEnvelope } from "./federation.js";
+
+/**
+ * Federation hook passed into Router at construction. When present,
+ * the router tries to forward offline-unicast messages via peer Wires
+ * before falling back to 'offline' status.
+ */
+export type RouterFederation = {
+  ourPeerName: string;
+  identity: ServerIdentity;
+};
 
 export type DeliveryResult = {
   agentId: string;
-  status: "delivered" | "offline";
+  status: "delivered" | "offline" | "forwarded" | "forward_failed";
+  peer?: string;
+  error?: string;
 };
 
 export type RouteListener = (msg: Message, deliveries: DeliveryResult[]) => void;
@@ -20,13 +34,21 @@ export type RouteListener = (msg: Message, deliveries: DeliveryResult[]) => void
 export class Router {
   private routeListeners = new Set<RouteListener>();
   private log: Logger;
+  private federation: RouterFederation | undefined;
 
   constructor(
     private store: Store,
     private emitter: MessageEmitter,
     log: Logger,
+    federation?: RouterFederation,
   ) {
     this.log = log.child({ component: "router" });
+    this.federation = federation;
+  }
+
+  /** Wire up federation after construction (lets us defer identity load). */
+  setFederation(federation: RouterFederation): void {
+    this.federation = federation;
   }
 
   onRoute(listener: RouteListener): () => void {
@@ -87,6 +109,19 @@ export class Router {
         delivered = this.emitter.emit(agentId, data, stored.seq);
       }
 
+      // If offline locally AND this is a unicast + federation is on,
+      // try to forward to a peer that claims this agent. The forward is
+      // fire-and-forget — the HTTP caller sees status="forwarding"
+      // immediately; success/failure lands in logs.
+      if (!delivered && msg.dest && this.federation) {
+        this.dispatchFederationForward(stored, agentId, msg).catch((e) => {
+          this.log.error({ event: "federation_dispatch_error", dest: agentId, err: e }, "federation dispatch failed");
+        });
+        this.store.logDelivery(stored.seq, agentId, "forwarding");
+        deliveries.push({ agentId, status: "forwarded" });
+        continue;
+      }
+
       const status = delivered ? "delivered" : "offline";
       this.store.logDelivery(stored.seq, agentId, delivered ? "ok" : "skipped_offline");
       deliveries.push({ agentId, status });
@@ -100,6 +135,41 @@ export class Router {
     }
 
     return { message: stored, deliveries };
+  }
+
+  /**
+   * Find a peer that claims the dest agent and forward the stored envelope.
+   * Runs async so route() stays synchronous; result is logged.
+   */
+  private async dispatchFederationForward(
+    stored: Message,
+    agentId: string,
+    original: { source: string; source_id?: string; source_cc_session?: string; dest?: string; dest_cc_session?: string; topic: string; payload: string; raw?: string },
+  ): Promise<void> {
+    const fed = this.federation!;
+    const peer = await findPeerForAgent(this.store, agentId, this.log);
+    if (!peer) {
+      this.log.info({ event: "federation_no_peer", dest: agentId, seq: stored.seq }, "no peer claims agent");
+      this.store.logDelivery(stored.seq, agentId, "forward_no_peer");
+      return;
+    }
+    const envelope: ForwardedEnvelope = {
+      source: original.source,
+      source_id: original.source_id ?? null,
+      source_cc_session: original.source_cc_session ?? null,
+      dest: agentId,
+      dest_cc_session: original.dest_cc_session ?? null,
+      topic: original.topic,
+      payload: original.payload,
+      raw: original.raw ?? null,
+    };
+    const result = await forwardToPeer(peer, fed.ourPeerName, fed.identity, envelope, this.log);
+    if (result.ok) {
+      this.store.updatePeerLastSeen(peer.name, Date.now());
+      this.store.logDelivery(stored.seq, agentId, `forwarded_to:${peer.name}`);
+    } else {
+      this.store.logDelivery(stored.seq, agentId, `forward_failed:${peer.name}:${"error" in result ? result.error.slice(0, 100) : ""}`);
+    }
   }
 
   /**
