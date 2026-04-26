@@ -191,12 +191,27 @@ export async function forwardToPeer(
  * Find the peer that claims `agentId`. Iterates peers in parallel
  * and returns the first positive match. Probe failures are treated
  * as negative (not fatal) so one dead peer doesn't block discovery.
+ *
+ * Optional cache short-circuits subsequent lookups for the same agent
+ * within the TTL window — a hot agent (Brioche talking to a planner
+ * many times in a minute) avoids re-probing every peer for each
+ * message.
  */
 export async function findPeerForAgent(
   store: Store,
   agentId: string,
   log?: Logger,
+  cache?: DiscoveryCache,
 ): Promise<Peer | null> {
+  if (cache) {
+    const hit = cache.get(agentId);
+    if (hit) {
+      // Re-resolve in case the peer's base_url changed since cached.
+      const peer = store.getPeer(hit);
+      if (peer) return peer;
+      cache.invalidate(agentId);
+    }
+  }
   const peers = store.listPeers();
   if (peers.length === 0) return null;
   // Parallel probes. First positive wins.
@@ -210,5 +225,118 @@ export async function findPeerForAgent(
     }
   });
   const results = await Promise.all(probes);
-  return results.find((r) => r !== null) ?? null;
+  const winner = results.find((r) => r !== null) ?? null;
+  if (winner && cache) cache.set(agentId, winner.name);
+  return winner;
+}
+
+/**
+ * Positive-discovery cache. Maps agent IDs to the peer name that
+ * claimed them; entries TTL out so a moved agent doesn't get
+ * forwarded to its old host indefinitely.
+ *
+ * Negative results are intentionally NOT cached — a peer that comes
+ * online or registers a new agent should be discoverable on the next
+ * forward attempt without waiting for a TTL.
+ */
+export class DiscoveryCache {
+  private entries = new Map<string, { peer: string; expiresAt: number }>();
+  constructor(private ttlMs: number = 60_000) {}
+
+  get(agentId: string): string | null {
+    const hit = this.entries.get(agentId);
+    if (!hit) return null;
+    if (hit.expiresAt < Date.now()) {
+      this.entries.delete(agentId);
+      return null;
+    }
+    return hit.peer;
+  }
+
+  set(agentId: string, peer: string): void {
+    this.entries.set(agentId, { peer, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  invalidate(agentId: string): void {
+    this.entries.delete(agentId);
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+
+  size(): number {
+    return this.entries.size;
+  }
+}
+
+/**
+ * URL refresh — signed announcement of our current public base_url
+ * to a peer. Used at boot when ngrok hands us a fresh hostname; the
+ * peer updates its peers.base_url for our entry so subsequent
+ * forwards reach us.
+ *
+ * Same JWT shape as forwardToPeer, with a body of
+ *   {name: ourPeerName, base_url: ourPublicUrl, ts: now}
+ * so the recipient knows which peer is announcing AND can
+ * resist rollback (later announcements supersede earlier ones).
+ */
+export async function announceUrlToPeer(
+  peer: Peer,
+  ourPeerName: string,
+  ourIdentity: ServerIdentity,
+  ourPublicUrl: string,
+  log?: Logger,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const body = JSON.stringify({ name: ourPeerName, base_url: ourPublicUrl, ts: Date.now() });
+    const { jwt } = await signRefreshJwt(ourPeerName, ourIdentity, body);
+    const res = await fetch(`${peer.base_url}/peers/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+      body,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      log?.warn({ event: "refresh_fail", peer: peer.name, status: res.status, body: text }, "peer URL refresh failed");
+      return { ok: false, error: `peer responded ${res.status}` };
+    }
+    log?.info({ event: "refresh_ok", peer: peer.name, our_url: ourPublicUrl }, "URL announced to peer");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+/** Sign-side helper for URL refresh — same shape as forwarded envelope. */
+export async function signRefreshJwt(
+  ourPeerName: string,
+  ourIdentity: ServerIdentity,
+  body: string,
+): Promise<{ jwt: string }> {
+  const header = { alg: "EdDSA", typ: "JWT" };
+  const payload = {
+    iss: `wire:${ourPeerName}`,
+    body_hash: await sha256Hex(body),
+    iat: Math.floor(Date.now() / 1000),
+  };
+  const signingInput = `${b64url(new TextEncoder().encode(JSON.stringify(header)))}.${b64url(new TextEncoder().encode(JSON.stringify(payload)))}`;
+  const sig = await crypto.subtle.sign("Ed25519", ourIdentity.privateKey, new TextEncoder().encode(signingInput));
+  return { jwt: `${signingInput}.${b64url(sig)}` };
+}
+
+/** Verify a refresh JWT and return the announcing peer + parsed body. */
+export async function verifyRefreshJwt(
+  jwt: string,
+  body: string,
+  store: Store,
+): Promise<{ peer: Peer; announced: { name: string; base_url: string; ts: number } }> {
+  // Reuse the forward verification — the JWT shape is identical.
+  // We just don't need the inner ForwardedEnvelope.
+  const { peer } = await verifyForwardedJwt(jwt, body, store);
+  const announced = JSON.parse(body) as { name: string; base_url: string; ts: number };
+  if (announced.name !== peer.name) {
+    throw new Error(`refresh body name '${announced.name}' does not match jwt iss peer '${peer.name}'`);
+  }
+  return { peer, announced };
 }

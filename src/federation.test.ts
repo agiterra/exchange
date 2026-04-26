@@ -4,7 +4,14 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { Store } from "./store";
 import { loadOrCreateServerIdentity } from "./identity";
-import { signForwardedEnvelope, verifyForwardedJwt, type ForwardedEnvelope } from "./federation";
+import {
+  signForwardedEnvelope,
+  verifyForwardedJwt,
+  signRefreshJwt,
+  verifyRefreshJwt,
+  DiscoveryCache,
+  type ForwardedEnvelope,
+} from "./federation";
 
 let tmpDir: string;
 let dbPath: string;
@@ -68,5 +75,55 @@ describe("federation sign + verify", () => {
   test("malformed JWT rejected", async () => {
     await expect(verifyForwardedJwt("not.a.jwt.maybe", "{}", store)).rejects.toThrow(/malformed JWT/);
     await expect(verifyForwardedJwt("only.two", "{}", store)).rejects.toThrow(/malformed JWT/);
+  });
+});
+
+describe("federation URL refresh", () => {
+  test("sign + verify round-trip works for refresh announcement", async () => {
+    const identity = await loadOrCreateServerIdentity(join(tmpDir, "server.key"));
+    store.createPeer({ name: "laptop", base_url: "https://old.ngrok.app", pubkey: identity.pubkeyB64 });
+
+    const body = JSON.stringify({ name: "laptop", base_url: "https://new.ngrok.app", ts: Date.now() });
+    const { jwt } = await signRefreshJwt("laptop", identity, body);
+    const { peer, announced } = await verifyRefreshJwt(jwt, body, store);
+    expect(peer.name).toBe("laptop");
+    expect(announced.base_url).toBe("https://new.ngrok.app");
+  });
+
+  test("body name mismatch with iss is rejected", async () => {
+    const identity = await loadOrCreateServerIdentity(join(tmpDir, "server.key"));
+    store.createPeer({ name: "laptop", base_url: "https://x", pubkey: identity.pubkeyB64 });
+
+    const body = JSON.stringify({ name: "imposter", base_url: "https://evil", ts: Date.now() });
+    const { jwt } = await signRefreshJwt("laptop", identity, body);
+    await expect(verifyRefreshJwt(jwt, body, store)).rejects.toThrow(/does not match jwt iss/);
+  });
+});
+
+describe("DiscoveryCache", () => {
+  test("get returns null on miss, peer name on hit, null after TTL", async () => {
+    const c = new DiscoveryCache(50);
+    expect(c.get("danish")).toBeNull();
+    c.set("danish", "home-mini");
+    expect(c.get("danish")).toBe("home-mini");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(c.get("danish")).toBeNull();
+  });
+
+  test("invalidate drops a single entry", () => {
+    const c = new DiscoveryCache();
+    c.set("a", "p1");
+    c.set("b", "p2");
+    c.invalidate("a");
+    expect(c.get("a")).toBeNull();
+    expect(c.get("b")).toBe("p2");
+  });
+
+  test("clear drops everything", () => {
+    const c = new DiscoveryCache();
+    c.set("a", "p1");
+    c.set("b", "p2");
+    c.clear();
+    expect(c.size()).toBe(0);
   });
 });

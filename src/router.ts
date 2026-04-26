@@ -10,7 +10,7 @@ import type { Logger } from "pino";
 import type { Store, Message } from "./store.js";
 import type { MessageEmitter } from "./emitter.js";
 import type { ServerIdentity } from "./identity.js";
-import { findPeerForAgent, forwardToPeer, type ForwardedEnvelope } from "./federation.js";
+import { findPeerForAgent, forwardToPeer, DiscoveryCache, type ForwardedEnvelope } from "./federation.js";
 
 /**
  * Federation hook passed into Router at construction. When present,
@@ -35,6 +35,7 @@ export class Router {
   private routeListeners = new Set<RouteListener>();
   private log: Logger;
   private federation: RouterFederation | undefined;
+  private discoveryCache = new DiscoveryCache(60_000);
 
   constructor(
     private store: Store,
@@ -44,6 +45,14 @@ export class Router {
   ) {
     this.log = log.child({ component: "router" });
     this.federation = federation;
+  }
+
+  /** Used by /peers/refresh handler to drop stale peer→agent cache entries. */
+  invalidateDiscoveryFor(peerName: string): void {
+    // Without per-peer indexing in the cache, the simplest correct
+    // invalidation is to clear it. Discovery is cheap to rebuild.
+    void peerName;
+    this.discoveryCache.clear();
   }
 
   /** Wire up federation after construction (lets us defer identity load). */
@@ -147,7 +156,7 @@ export class Router {
     original: { source: string; source_id?: string; source_cc_session?: string; dest?: string; dest_cc_session?: string; topic: string; payload: string; raw?: string },
   ): Promise<void> {
     const fed = this.federation!;
-    const peer = await findPeerForAgent(this.store, agentId, this.log);
+    const peer = await findPeerForAgent(this.store, agentId, this.log, this.discoveryCache);
     if (!peer) {
       this.log.info({ event: "federation_no_peer", dest: agentId, seq: stored.seq }, "no peer claims agent");
       this.store.logDelivery(stored.seq, agentId, "forward_no_peer");

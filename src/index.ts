@@ -69,6 +69,27 @@ const heartbeats = new HeartbeatScheduler(store, router, log);
 const server = createServer({ port, store, router, emitter, log, heartbeats });
 heartbeats.start();
 
+// Boot-time peer announcement (v1.1.0 federation). If we have a public
+// URL configured, fan out a /peers/refresh to every registered peer so
+// they learn our (possibly rotated) ngrok hostname. Best-effort —
+// failures are logged, not fatal. Skip on first boot when no peers
+// exist yet, and skip in dev when WIRE_PUBLIC_URL is unset.
+const ourPublicUrl = (process.env.WIRE_PUBLIC_URL ?? "").trim();
+if (ourPublicUrl) {
+  const { announceUrlToPeer } = await import("./federation.js");
+  const peers = store.listPeers();
+  if (peers.length > 0) {
+    log.info({ event: "peer_announce_boot", count: peers.length, our_url: ourPublicUrl }, "announcing public URL to peers");
+    void Promise.all(peers.map((p) =>
+      announceUrlToPeer(p, ourPeerName, serverIdentity, ourPublicUrl, log).catch((err) =>
+        log.warn({ event: "peer_announce_error", peer: p.name, err: String(err) }, "peer announcement crashed"),
+      ),
+    ));
+  }
+} else {
+  log.debug({ event: "peer_announce_skipped" }, "WIRE_PUBLIC_URL not set — no peer announcement");
+}
+
 // Session reconciler — update status based on heartbeat age
 setInterval(() => {
   const transitions = store.reconcileSessions(staleMs, disconnectMs);
