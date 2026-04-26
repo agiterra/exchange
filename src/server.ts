@@ -291,6 +291,31 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     return c.json({ ok: false, id }, 404);
   });
 
+  // POST /peers/refresh  — peer announces its current public base_url
+  //   (used after ngrok rotates the random hostname). Same JWT shape
+  //   as /peers/forward. We update peers.base_url and clear the
+  //   router's discovery cache so subsequent forwards re-resolve.
+  app.post("/peers/refresh", async (c) => {
+    const auth = c.req.header("authorization") ?? "";
+    const jwt = auth.replace(/^Bearer /, "");
+    if (!jwt) return c.json({ error: "missing Bearer JWT" }, 401);
+    const body = (c as any).get("rawBody") ?? await c.req.text();
+    try {
+      const { verifyRefreshJwt } = await import("./federation.js");
+      const { peer, announced } = await verifyRefreshJwt(jwt, body, store);
+      if (peer.base_url !== announced.base_url) {
+        store.updatePeerUrl(peer.name, announced.base_url);
+      }
+      store.updatePeerLastSeen(peer.name, Date.now());
+      // Invalidate discovery cache so old base_url isn't served via
+      // a cached agent->peer mapping.
+      (router as any).invalidateDiscoveryFor?.(peer.name);
+      return c.json({ ok: true, peer: peer.name, base_url: announced.base_url });
+    } catch (e) {
+      return c.json({ error: "peer refresh rejected", detail: (e as Error).message }, 401);
+    }
+  });
+
   // POST /peers/forward  — accept a message forwarded by a peer Wire.
   //   Authorization: Bearer <outer-JWT> signed by the peer's server
   //   identity. Body is the original envelope exactly as the peer's
