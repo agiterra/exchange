@@ -7,8 +7,27 @@
 import { join } from "path";
 import { homedir } from "os";
 import { readdirSync, readFileSync, unlinkSync } from "fs";
+import { execFileSync } from "child_process";
 import { config } from "dotenv";
 import pino from "pino";
+
+/**
+ * Returns true if `pid` is a launchd-orphan (its parent is PID 1) or already
+ * dead. Used by the session reaper to detect surviving bun MCP processes
+ * whose Claude Code parent has exited — they keep heartbeating and would
+ * otherwise pin a phantom session forever.
+ */
+function isOrphanOrDead(pid: number): boolean {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "ppid="], {
+      stdio: ["ignore", "pipe", "ignore"],
+    }).toString().trim();
+    if (!out) return true; // no row = dead
+    return parseInt(out, 10) === 1;
+  } catch {
+    return true; // ps failed = dead
+  }
+}
 
 // Load all Wire config from ~/.wire/.env
 config({ path: join(homedir(), ".wire", ".env") });
@@ -102,21 +121,33 @@ setInterval(() => {
     }
   }
 
-  // Check session files for dead Claude Code processes
+  // Check session files for dead or orphaned Claude Code processes.
+  // A session is reapable if ANY of these hold:
+  //   - ccPid is null (legacy MCP that couldn't track its CC parent)
+  //   - ccPid is dead (CC exited cleanly)
+  //   - ccPid is alive but reparented to launchd (CC died, MCP survived as orphan)
+  // When reaping, also SIGTERM the bun MCP pid so it doesn't reconnect with
+  // a fresh session on the next iteration.
   const sessionsDir = join(homedir(), ".wire", "sessions");
   try {
     const files = readdirSync(sessionsDir).filter((f) => f.endsWith(".json"));
     for (const file of files) {
       try {
         const data = JSON.parse(readFileSync(join(sessionsDir, file), "utf-8"));
-        if (data.ccPid) {
-          try { process.kill(data.ccPid, 0); } catch {
-            // Claude Code process is dead — disconnect and clean up
-            log.info({ event: "cc_dead", agentId: data.agentId, ccPid: data.ccPid, sessionId: data.sessionId }, "Claude Code dead, disconnecting");
-            store.disconnectSession(data.sessionId);
-            emitter.closeAndUnregister(data.agentId, data.sessionId);
-            unlinkSync(join(sessionsDir, file));
+        const reason =
+          data.ccPid == null
+            ? "no_cc_pid"
+            : isOrphanOrDead(data.ccPid)
+              ? "cc_dead_or_orphan"
+              : null;
+        if (reason) {
+          log.info({ event: "session_reap", reason, agentId: data.agentId, ccPid: data.ccPid, mcpPid: data.pid, sessionId: data.sessionId }, "reaping orphan session");
+          store.disconnectSession(data.sessionId);
+          emitter.closeAndUnregister(data.agentId, data.sessionId);
+          if (data.pid) {
+            try { process.kill(data.pid, "SIGTERM"); } catch {}
           }
+          unlinkSync(join(sessionsDir, file));
         }
       } catch {}
     }
