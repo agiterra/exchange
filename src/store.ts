@@ -414,6 +414,7 @@ export class Store {
         permanent = CASE WHEN excluded.permanent = 1 THEN 1 ELSE agents.permanent END,
         pronouns = COALESCE(excluded.pronouns, agents.pronouns),
         last_seen_at = excluded.last_seen_at,
+        created_at = excluded.created_at,
         reaped_at = NULL
     `).run(agent.id, agent.display_name, agent.pubkey, agent.permanent ? 1 : 0, agent.pronouns ?? null, now, now);
   }
