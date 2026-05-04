@@ -361,7 +361,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
   app.post("/agents/register", async (c) => {
     const body = await c.req.json();
-    const { id, display_name, pubkey, permanent, pronouns } = body;
+    const { id, display_name, pubkey, permanent, pronouns, force_rotate } = body;
 
     if (!id || !display_name || !pubkey) {
       return c.json({ error: "missing required fields: id, display_name, pubkey" }, 400);
@@ -369,6 +369,21 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
     const existing = store.getAgent(id);
     const reaped = !existing ? store.getReapedAgent(id) : null;
+
+    // Reject silent key rotation. If a record exists (live or reaped) with a
+    // different pubkey and the caller didn't pass force_rotate=true, fail
+    // loudly so a sponsor doesn't accidentally orphan a still-running process
+    // that holds the previous private key (the Eclair-on-2026-05-01 case).
+    const priorPubkey = existing?.pubkey ?? reaped?.pubkey ?? null;
+    if (priorPubkey && priorPubkey !== pubkey && !force_rotate) {
+      return c.json({
+        error: `agent '${id}' already registered with a different key. Pass force_rotate=true to replace the keypair (this will permanently lock out any process still holding the previous private key).`,
+        code: "agent_exists_pubkey_mismatch",
+        existing: !!existing,
+        reaped: !!reaped,
+      }, 409);
+    }
+
     let authPath: string;
     if (existing && existing.permanent) {
       authPath = "permanent-reregister";
