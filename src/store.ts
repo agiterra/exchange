@@ -652,8 +652,23 @@ export class Store {
   /**
    * Get ephemeral agent IDs that are candidates for reaping (without deleting).
    */
-  getEphemeralCandidates(ttlMs: number): string[] {
-    const cutoff = Date.now() - ttlMs;
+  /**
+   * Reap-candidate query. Two TTLs:
+   *
+   *   ttlMs              applies to agents that have at least one session row
+   *                      (i.e. their plugin booted, registered a session, then
+   *                      went silent). 5 min is fine — they were healthy.
+   *
+   *   neverConnectedTtlMs applies to agents that have NEVER opened a session.
+   *                      This is the slow-spawn case (Crumpet 2026-05-04: bun
+   *                      install + handshake exceeded 5 min). Reap longer to
+   *                      give plugin bootstrap headroom, but still reap so
+   *                      abandoned registrations don't leak forever.
+   */
+  getEphemeralCandidates(ttlMs: number, neverConnectedTtlMs: number): string[] {
+    const now = Date.now();
+    const sessionCutoff = now - ttlMs;
+    const neverConnectedCutoff = now - neverConnectedTtlMs;
     return (this.db.prepare(`
       SELECT a.id FROM agents a
       WHERE a.permanent = 0
@@ -666,12 +681,16 @@ export class Store {
           SELECT 1 FROM agent_sessions s
           WHERE s.agent_id = a.id AND s.last_heartbeat > ?
         )
-        AND a.created_at < ?
-    `).all(cutoff, cutoff) as { id: string }[]).map((r) => r.id);
+        AND CASE
+          WHEN EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_id = a.id)
+            THEN a.created_at < ?
+          ELSE a.created_at < ?
+        END
+    `).all(sessionCutoff, sessionCutoff, neverConnectedCutoff) as { id: string }[]).map((r) => r.id);
   }
 
-  cleanEphemeralAgents(ttlMs: number): string[] {
-    const candidates = this.getEphemeralCandidates(ttlMs);
+  cleanEphemeralAgents(ttlMs: number, neverConnectedTtlMs: number): string[] {
+    const candidates = this.getEphemeralCandidates(ttlMs, neverConnectedTtlMs);
 
     for (const id of candidates) {
       this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);

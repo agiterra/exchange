@@ -56,7 +56,8 @@ const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
 const staleMs = parseInt(process.env.STALE_MS ?? "15000", 10);
 const disconnectMs = parseInt(process.env.DISCONNECT_MS ?? "60000", 10);
 const reconcilerIntervalMs = parseInt(process.env.RECONCILER_INTERVAL_MS ?? "10000", 10);
-const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "300000", 10); // 5 minutes — must exceed agent boot time
+const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "300000", 10); // 5 minutes — applies to agents that have opened at least one session
+const ephemeralNeverConnectedTtlMs = parseInt(process.env.EPHEMERAL_NEVER_CONNECTED_TTL_MS ?? "1800000", 10); // 30 minutes — applies to agents that have NEVER opened a session (slow plugin bootstrap headroom)
 
 export const log = pino({ name: "wire" });
 
@@ -154,7 +155,7 @@ setInterval(() => {
   } catch {}
 
   // Before reaping ephemeral agents, run client-provided cleanup code for their webhooks
-  const candidates = store.getEphemeralCandidates(ephemeralTtlMs);
+  const candidates = store.getEphemeralCandidates(ephemeralTtlMs, ephemeralNeverConnectedTtlMs);
   for (const agentId of candidates) {
     const webhooks = store.getWebhooksForAgent(agentId);
     for (const wh of webhooks) {
@@ -170,7 +171,7 @@ setInterval(() => {
     }
   }
 
-  const removed = store.cleanEphemeralAgents(ephemeralTtlMs);
+  const removed = store.cleanEphemeralAgents(ephemeralTtlMs, ephemeralNeverConnectedTtlMs);
   if (removed.length > 0) {
     log.info({ event: "ephemeral_cleanup", agents: removed }, `removed ${removed.length} ephemeral agent(s)`);
   }
