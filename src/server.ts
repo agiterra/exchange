@@ -351,11 +351,27 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
   app.get("/agents", (c) => {
     const agents = store.getAllAgents();
-    const result = agents.map((a) => ({
-      ...a,
-      online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
-      sessions: store.getActiveSessions(a.id).length,
-    }));
+    const result = agents.map((a) => {
+      const online = emitter.isConnected(a.id) || store.hasConnectedSession(a.id);
+      // connection_status drives dashboard rendering:
+      //   connected     — active SSE session, recent heartbeat
+      //   connecting    — registered, no session yet, within reap grace
+      //   disconnected  — soft-reaped (greyed); recoverable on next register/heartbeat
+      let connection_status: "connected" | "connecting" | "disconnected";
+      if (a.reaped_at != null) {
+        connection_status = "disconnected";
+      } else if (online) {
+        connection_status = "connected";
+      } else {
+        connection_status = "connecting";
+      }
+      return {
+        ...a,
+        online,
+        connection_status,
+        sessions: store.getActiveSessions(a.id).length,
+      };
+    });
     return c.json(result);
   });
 
@@ -367,32 +383,32 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       return c.json({ error: "missing required fields: id, display_name, pubkey" }, 400);
     }
 
+    // getAgent now returns greyed agents too. Distinguish by reaped_at.
     const existing = store.getAgent(id);
-    const reaped = !existing ? store.getReapedAgent(id) : null;
+    const isGreyed = existing != null && existing.reaped_at != null;
 
-    // Reject silent key rotation. If a record exists (live or reaped) with a
-    // different pubkey and the caller didn't pass force_rotate=true, fail
-    // loudly so a sponsor doesn't accidentally orphan a still-running process
-    // that holds the previous private key (the Eclair-on-2026-05-01 case).
-    const priorPubkey = existing?.pubkey ?? reaped?.pubkey ?? null;
-    if (priorPubkey && priorPubkey !== pubkey && !force_rotate) {
+    // Reject silent key rotation. If any record exists with a different pubkey
+    // and the caller didn't pass force_rotate=true, fail loudly so a sponsor
+    // doesn't accidentally orphan a still-running process that holds the
+    // previous private key (the Eclair-on-2026-05-01 case).
+    if (existing && existing.pubkey !== pubkey && !force_rotate) {
       return c.json({
         error: `agent '${id}' already registered with a different key. Pass force_rotate=true to replace the keypair (this will permanently lock out any process still holding the previous private key).`,
         code: "agent_exists_pubkey_mismatch",
-        existing: !!existing,
-        reaped: !!reaped,
+        existing: !isGreyed,
+        reaped: isGreyed,
       }, 409);
     }
 
     let authPath: string;
     if (existing && existing.permanent) {
-      authPath = "permanent-reregister";
-      // Permanent agent re-registering — must prove identity
+      authPath = isGreyed ? "permanent-readmission" : "permanent-reregister";
+      // Permanent agent (alive or greyed) — must prove identity with own key
       const err = await requireAgent(c, id);
       if (err) return err;
-    } else if (existing && !existing.permanent) {
+    } else if (existing && !existing.permanent && !isGreyed) {
       authPath = "ephemeral-reregister";
-      // Ephemeral agent re-registering — allow the agent itself or any sponsoring agent
+      // Ephemeral agent re-registering while still alive — allow the agent itself or any sponsoring agent
       const selfErr = await requireAgent(c, id);
       if (selfErr) {
         const sponsorErr = await requireAgentOrOperator(c);
@@ -404,12 +420,12 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       const err = requireOperator(c);
       if (err) return err;
     } else {
-      authPath = reaped ? "reaped-readmission" : "new-ephemeral";
-      // New ephemeral agent — check for a reaped agent with matching pubkey (re-admission)
-      if (reaped && reaped.pubkey === pubkey) {
-        // Same agent, same key — let them back in
+      authPath = isGreyed ? "reaped-readmission" : "new-ephemeral";
+      // Greyed ephemeral with matching pubkey: same agent waking up; let them back in.
+      // Truly new ephemeral: requires sponsor or operator auth.
+      if (isGreyed && existing!.pubkey === pubkey) {
+        // pubkey already matches (we'd have rejected mismatch above without force_rotate)
       } else {
-        // Truly new — must be registered by an authenticated agent or operator
         const err = await requireAgentOrOperator(c);
         if (err) return err;
       }
@@ -421,7 +437,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       authPath,
       bodyPermanent: permanent,
       existingPermanent: existing?.permanent ?? null,
-      reaped: !!reaped,
+      greyed: isGreyed,
       pubkeyMatch: existing ? existing.pubkey === pubkey : null,
     }, `REGISTER ${id} via ${authPath}`);
 
@@ -449,6 +465,10 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     }
 
     store.touchAgent(agentId);
+    // Successful new session = liveness signal. Clear any greyed state.
+    if (store.clearReap(agentId)) {
+      log.info({ event: "agent_un_greyed", agent: agentId, via: "connect" }, `agent ${agentId} → connected (un-greyed)`);
+    }
     // cc_session_id identifies the Claude Code session (survives SSE reconnects)
     const session = store.createSession(agentId, "claude-code", body.cc_session_id);
     notifyDashboard();
@@ -478,6 +498,16 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
     store.disconnectSession(session_id);
     emitter.closeAndUnregister(agentId, session_id);
+
+    // Clean shutdown: if this was the agent's last live session, immediately
+    // soft-reap (grey) so the dashboard reflects state without waiting for the
+    // reconciler. Permanent agents stay greyed indefinitely; ephemerals get
+    // hard-deleted after the delete grace.
+    const reapGraceMs = parseInt(process.env.REAP_GRACE_MS ?? "20000", 10);
+    if (!store.agentHasLiveSession(agentId, reapGraceMs)) {
+      store.softReapAgent(agentId);
+      log.info({ event: "agent_soft_reap", agent: agentId, via: "clean_disconnect" }, `agent ${agentId} → greyed (clean shutdown)`);
+    }
     notifyDashboard();
     return c.json({ disconnected: true });
   });
@@ -595,6 +625,10 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     if (err) return err;
 
     store.heartbeatSession(sessionId);
+    // Heartbeat = liveness signal. Clear greyed state if applicable.
+    if (store.clearReap(agentId)) {
+      log.info({ event: "agent_un_greyed", agent: agentId, via: "heartbeat" }, `agent ${agentId} → connected (un-greyed)`);
+    }
     return c.json({ ok: true });
   });
 

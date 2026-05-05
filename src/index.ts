@@ -52,11 +52,17 @@ if (cliResult.exit !== -1) {
 
 const port = parseInt(process.env.WIRE_PORT ?? "9800", 10);
 const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
-// Heartbeat: 10s interval from clients. Stale after 15s, disconnected after 60s.
-const staleMs = parseInt(process.env.STALE_MS ?? "15000", 10);
-const disconnectMs = parseInt(process.env.DISCONNECT_MS ?? "60000", 10);
+// Heartbeat: 10s interval from clients. Stale after 20s, disconnected after 30s.
+const staleMs = parseInt(process.env.STALE_MS ?? "20000", 10);
+const disconnectMs = parseInt(process.env.DISCONNECT_MS ?? "30000", 10);
 const reconcilerIntervalMs = parseInt(process.env.RECONCILER_INTERVAL_MS ?? "10000", 10);
-const ephemeralTtlMs = parseInt(process.env.EPHEMERAL_TTL_MS ?? "300000", 10); // 5 minutes — must exceed agent boot time
+// Lifecycle (v1.2.0): two-phase reap.
+//   reapGraceMs   — agent goes greyed-out after this long with no session heartbeat
+//                   (and at least this long after register, for never-connected agents)
+//   deleteGraceMs — ephemeral agents are hard-deleted this long after going greyed
+//                   (permanent agents stay greyed indefinitely until they re-register)
+const reapGraceMs = parseInt(process.env.REAP_GRACE_MS ?? "20000", 10);
+const deleteGraceMs = parseInt(process.env.DELETE_GRACE_MS ?? "3600000", 10);
 
 export const log = pino({ name: "wire" });
 
@@ -153,9 +159,22 @@ setInterval(() => {
     }
   } catch {}
 
-  // Before reaping ephemeral agents, run client-provided cleanup code for their webhooks
-  const candidates = store.getEphemeralCandidates(ephemeralTtlMs);
-  for (const agentId of candidates) {
+  // --- Pass 1: soft-reap (grey out) inactive agents ---
+  // Agents with no recent heartbeat (and outside the registration grace
+  // window) get reaped_at set. They remain in the registry, in dashboard,
+  // and remain authenticatable — any heartbeat / send / register clears
+  // the greyed state via clearReap().
+  const softReapIds = store.getSoftReapCandidates(reapGraceMs);
+  for (const agentId of softReapIds) {
+    store.softReapAgent(agentId);
+    log.info({ event: "agent_soft_reap", agent: agentId }, `agent ${agentId} → greyed`);
+  }
+
+  // --- Pass 2: hard-delete greyed ephemerals past the delete grace ---
+  // Permanent agents are excluded by the query — they stay greyed forever
+  // until they re-register. Run webhook cleanup before deleting.
+  const hardDeleteIds = store.getHardDeleteCandidates(deleteGraceMs);
+  for (const agentId of hardDeleteIds) {
     const webhooks = store.getWebhooksForAgent(agentId);
     for (const wh of webhooks) {
       if (wh.cleanup) {
@@ -168,11 +187,8 @@ setInterval(() => {
         });
       }
     }
-  }
-
-  const removed = store.cleanEphemeralAgents(ephemeralTtlMs);
-  if (removed.length > 0) {
-    log.info({ event: "ephemeral_cleanup", agents: removed }, `removed ${removed.length} ephemeral agent(s)`);
+    store.hardDeleteAgent(agentId);
+    log.info({ event: "agent_hard_delete", agent: agentId }, `agent ${agentId} → deleted`);
   }
 }, reconcilerIntervalMs);
 
