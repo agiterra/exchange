@@ -176,6 +176,8 @@ export type Agent = {
   last_seen_at: number | null;
   plan: string | null;
   pronouns: string | null;
+  /** Timestamp of soft-reap (greyed-out). NULL when agent is active. */
+  reaped_at: number | null;
 };
 
 export type SessionStatus = "connected" | "stale" | "disconnected";
@@ -395,12 +397,32 @@ export class Store {
 
   // --- Agents ---
 
+  /**
+   * Return an agent record. Includes soft-reaped (greyed) agents — being
+   * greyed in the dashboard does not invalidate the agent's identity. JWT
+   * verification still passes against a greyed agent's pubkey, and any
+   * authenticated activity (heartbeat, register, send) clears the greyed
+   * state via clearReap().
+   */
   getAgent(id: string): Agent | null {
-    return (this.db.prepare("SELECT * FROM agents WHERE id = ? AND reaped_at IS NULL").get(id) as Agent) ?? null;
+    return (this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent) ?? null;
   }
 
+  /** Return all agents including soft-reaped (greyed) ones. */
   getAllAgents(): Agent[] {
-    return this.db.prepare("SELECT * FROM agents WHERE reaped_at IS NULL").all() as Agent[];
+    return this.db.prepare("SELECT * FROM agents").all() as Agent[];
+  }
+
+  /**
+   * Clear an agent's greyed state. Called whenever an agent demonstrates
+   * liveness — heartbeat success, new session connect, or register upsert.
+   * No-op if reaped_at is already NULL.
+   */
+  clearReap(id: string): boolean {
+    const res = this.db.prepare(
+      "UPDATE agents SET reaped_at = NULL, last_seen_at = ? WHERE id = ? AND reaped_at IS NOT NULL",
+    ).run(Date.now(), id);
+    return res.changes > 0;
   }
 
   upsertAgent(agent: { id: string; display_name: string; pubkey: string; permanent?: boolean; pronouns?: string }): void {
@@ -643,25 +665,27 @@ export class Store {
     ).run(messageSeq, agentId, Date.now(), result, error ?? null);
   }
 
-  // --- Ephemeral agent cleanup ---
+  // --- Agent lifecycle: soft-reap (grey) and hard-delete ---
 
   /**
-   * Clean up ephemeral agents: not permanent, no active sessions,
-   * and not seen within the TTL window.
+   * Soft-reap candidates: agents that should be greyed-out in the dashboard.
+   *
+   * An agent is a candidate when it has demonstrated no liveness within
+   * `reapGraceMs` (default ~20s = 2 heartbeats):
+   *   - no session has heartbeated within the grace window
+   *   - the agent itself was registered before the cutoff (gives never-
+   *     connected agents a brief window to open their first session before
+   *     greying)
+   *
+   * Soft-reap does not delete anything. The agent record stays, sessions stay
+   * (their own status is managed by the session reconciler). Only `reaped_at`
+   * is set, marking the agent as greyed.
    */
-  /**
-   * Get ephemeral agent IDs that are candidates for reaping (without deleting).
-   */
-  getEphemeralCandidates(ttlMs: number): string[] {
-    const cutoff = Date.now() - ttlMs;
+  getSoftReapCandidates(reapGraceMs: number): string[] {
+    const cutoff = Date.now() - reapGraceMs;
     return (this.db.prepare(`
       SELECT a.id FROM agents a
-      WHERE a.permanent = 0
-        AND a.reaped_at IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM agent_sessions s
-          WHERE s.agent_id = a.id AND s.status IN ('connected', 'stale')
-        )
+      WHERE a.reaped_at IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM agent_sessions s
           WHERE s.agent_id = a.id AND s.last_heartbeat > ?
@@ -670,21 +694,50 @@ export class Store {
     `).all(cutoff, cutoff) as { id: string }[]).map((r) => r.id);
   }
 
-  cleanEphemeralAgents(ttlMs: number): string[] {
-    const candidates = this.getEphemeralCandidates(ttlMs);
-
-    for (const id of candidates) {
-      this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
-      this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
-      this.db.prepare("UPDATE agents SET reaped_at = ? WHERE id = ?").run(Date.now(), id);
-    }
-    return candidates;
+  /** Mark an agent as greyed-out. Idempotent. */
+  softReapAgent(id: string): void {
+    this.db.prepare(
+      "UPDATE agents SET reaped_at = ? WHERE id = ? AND reaped_at IS NULL",
+    ).run(Date.now(), id);
   }
 
-  getReapedAgent(id: string): { id: string; pubkey: string } | null {
-    return (this.db.prepare(
-      "SELECT id, pubkey FROM agents WHERE id = ? AND reaped_at IS NOT NULL"
-    ).get(id) as { id: string; pubkey: string }) ?? null;
+  /**
+   * Hard-delete candidates: ephemeral agents that have been greyed-out for
+   * longer than `deleteGraceMs` (default 1h). Permanent agents are never
+   * hard-deleted — they stay greyed indefinitely until they re-register.
+   */
+  getHardDeleteCandidates(deleteGraceMs: number): string[] {
+    const cutoff = Date.now() - deleteGraceMs;
+    return (this.db.prepare(`
+      SELECT id FROM agents
+      WHERE permanent = 0
+        AND reaped_at IS NOT NULL
+        AND reaped_at < ?
+    `).all(cutoff) as { id: string }[]).map((r) => r.id);
+  }
+
+  /** Hard-delete an agent and its dependent rows. */
+  hardDeleteAgent(id: string): void {
+    this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
+    this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
+    this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+  }
+
+  /**
+   * Returns true if the agent has any session that is currently connected,
+   * stale, or recently heartbeated within `reapGraceMs`. Used by the
+   * disconnect path to decide whether last-session-gone should trigger an
+   * immediate grey-out (clean shutdown semantics).
+   */
+  agentHasLiveSession(agentId: string, reapGraceMs: number): boolean {
+    const cutoff = Date.now() - reapGraceMs;
+    const row = this.db.prepare(`
+      SELECT 1 FROM agent_sessions
+      WHERE agent_id = ?
+        AND (status IN ('connected', 'stale') OR last_heartbeat > ?)
+      LIMIT 1
+    `).get(agentId, cutoff);
+    return !!row;
   }
 
   // --- Operators ---
