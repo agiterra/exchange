@@ -1056,7 +1056,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       return c.json({ error: "unauthorized" }, 401);
     }
     const limit = parseInt(c.req.query("limit") ?? "50", 10);
-    const messages = store.getRecentMessagesByCount(limit, "ipc").map((msg) => {
+    const messages = store.getRecentIpcLogMessages(limit).map((msg) => {
       let content: unknown;
       try {
         const envelope = JSON.parse(msg.payload);
@@ -1106,9 +1106,19 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
           dashboardStateListeners.add(sendState);
           const interval = setInterval(sendState, 3000);
 
-          // Live message log (backfill handled client-side via /messages/recent)
+          // Live message log (backfill handled client-side via /messages/recent).
+          // Match the same IPC-family pattern as store.getRecentIpcLogMessages:
+          // legacy `ipc`/`ipc.*` and the webhook-envelope `webhook.ipc`/`webhook.ipc.*`.
+          // Anything else (webhook.github, webhook.operator-relay, heartbeat, etc.)
+          // belongs in other panels, not the agent-to-agent IPC log.
           const unsubRoute = router.onRoute((msg, deliveries) => {
-            if (msg.topic !== "ipc") return;
+            const t = msg.topic;
+            const isIpcFamily =
+              t === "ipc" ||
+              t.startsWith("ipc.") ||
+              t === "webhook.ipc" ||
+              t.startsWith("webhook.ipc.");
+            if (!isIpcFamily) return;
             let content: unknown;
             try {
               const envelope = JSON.parse(msg.payload);

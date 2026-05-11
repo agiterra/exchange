@@ -386,6 +386,25 @@ export class Store {
     ).all(limit) as Message[];
   }
 
+  /**
+   * Recent IPC-family messages for the dashboard log.
+   *
+   * The dashboard's "Message Log" is supposed to surface agent-to-agent IPC.
+   * Historically the topic was `ipc`, but the wire-ipc adapter now wraps
+   * payloads in a webhook envelope and routes under `webhook.ipc` (and
+   * sub-topics `webhook.ipc.task` etc). The legacy `ipc` topic stopped
+   * receiving writes on 2026-04-01 once everyone moved to the envelope,
+   * which is why the dashboard log silently froze.
+   *
+   * Match: `ipc`, `ipc.*`, `webhook.ipc`, `webhook.ipc.*`.
+   * Excludes: `webhook.github`, `webhook.operator-relay`, `heartbeat`, etc.
+   */
+  getRecentIpcLogMessages(limit = 50): Message[] {
+    return this.db.prepare(
+      "SELECT * FROM (SELECT * FROM messages WHERE topic = 'ipc' OR topic LIKE 'ipc.%' OR topic = 'webhook.ipc' OR topic LIKE 'webhook.ipc.%' ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC"
+    ).all(limit) as Message[];
+  }
+
   getMessagesForAgent(agentId: string, sinceSeq: number, limit = 100): Message[] {
     // Include broadcasts (dest IS NULL) so replay delivers every message the
     // agent would have received live. Without this, agents that reconnect after
