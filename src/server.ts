@@ -499,14 +499,28 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     store.disconnectSession(session_id);
     emitter.closeAndUnregister(agentId, session_id);
 
-    // Clean shutdown: if this was the agent's last live session, immediately
-    // soft-reap (grey) so the dashboard reflects state without waiting for the
-    // reconciler. Permanent agents stay greyed indefinitely; ephemerals get
-    // hard-deleted after the delete grace.
+    // Clean shutdown: if this was the agent's last live session, decide what
+    // to do based on permanence.
+    //
+    //   Permanent agent → soft-reap (grey forever; can re-register later).
+    //   Ephemeral agent → hard-delete NOW. A clean disconnect from an
+    //                     ephemeral is intentional and definitive — the agent
+    //                     said "I'm done." There's no recovery path expected,
+    //                     so don't leave it grey for the delete grace.
+    //
+    // Contrast: when the session reaper detects a dead CC (cc_dead_or_orphan),
+    // the disconnect is INVOLUNTARY (kill, crash, sleep). Those go through
+    // soft-reap → grace → hard-delete so brief failures can recover.
     const reapGraceMs = parseInt(process.env.REAP_GRACE_MS ?? "20000", 10);
     if (!store.agentHasLiveSession(agentId, reapGraceMs)) {
-      store.softReapAgent(agentId);
-      log.info({ event: "agent_soft_reap", agent: agentId, via: "clean_disconnect" }, `agent ${agentId} → greyed (clean shutdown)`);
+      const agent = store.getAgent(agentId);
+      if (agent && !agent.permanent) {
+        store.hardDeleteAgent(agentId);
+        log.info({ event: "agent_hard_delete", agent: agentId, via: "clean_disconnect" }, `agent ${agentId} → deleted (clean shutdown of ephemeral)`);
+      } else {
+        store.softReapAgent(agentId);
+        log.info({ event: "agent_soft_reap", agent: agentId, via: "clean_disconnect" }, `agent ${agentId} → greyed (clean shutdown)`);
+      }
     }
     notifyDashboard();
     return c.json({ disconnected: true });
