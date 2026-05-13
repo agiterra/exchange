@@ -31,7 +31,12 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at      INTEGER NOT NULL,
     last_seen_at    INTEGER,
     plan            TEXT,
-    reaped_at       INTEGER
+    reaped_at       INTEGER,
+    -- Identity kind. Default 'agent' = a humanlike participant (Claude session,
+    -- codex agent, operator). Other kinds (e.g. 'integration') share the same
+    -- Ed25519 + JWT + SSE plumbing but are filtered out of the default agent
+    -- list so they don't pollute the crew dashboard.
+    kind            TEXT NOT NULL DEFAULT 'agent'
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -167,6 +172,9 @@ export type Message = {
   raw: string | null;
 };
 
+/** Identity-kind discriminator on the agents table. */
+export type AgentKind = "agent" | "integration";
+
 export type Agent = {
   id: string;
   display_name: string;
@@ -178,6 +186,13 @@ export type Agent = {
   pronouns: string | null;
   /** Timestamp of soft-reap (greyed-out). NULL when agent is active. */
   reaped_at: number | null;
+  /**
+   * Identity kind. 'agent' is the default and covers Claude / codex / operator
+   * participants. 'integration' is for service integrations (e.g. the
+   * wallet-vault Chrome extension) — same auth + transport, filtered out of
+   * the default agent list.
+   */
+  kind: AgentKind;
 };
 
 export type SessionStatus = "connected" | "stale" | "disconnected";
@@ -328,6 +343,16 @@ export class Store {
       this.db.exec("ALTER TABLE agents ADD COLUMN pronouns TEXT");
     }
 
+    // Add kind column to agents (identity-type discriminator). Default 'agent'.
+    // Other values: 'integration' (e.g. wallet-vault browser extension, future
+    // first-class service integrations). Sharing the agents table keeps the
+    // same Ed25519 + JWT + SSE plumbing; the column just controls which
+    // list-style endpoints surface the row.
+    const agentCols4 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!agentCols4.some((c) => c.name === "kind")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'");
+    }
+
     // Index source_id on messages for dedup lookups
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_messages_source_id ON messages(source_id)");
   }
@@ -427,9 +452,17 @@ export class Store {
     return (this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent) ?? null;
   }
 
-  /** Return all agents including soft-reaped (greyed) ones. */
-  getAllAgents(): Agent[] {
-    return this.db.prepare("SELECT * FROM agents").all() as Agent[];
+  /**
+   * Return agents including soft-reaped (greyed) ones.
+   *
+   * Default: kind='agent' only (humanlike participants). Pass kind='integration'
+   * for service integrations, or kind='all' for both.
+   */
+  getAllAgents(kind: AgentKind | "all" = "agent"): Agent[] {
+    if (kind === "all") {
+      return this.db.prepare("SELECT * FROM agents").all() as Agent[];
+    }
+    return this.db.prepare("SELECT * FROM agents WHERE kind = ?").all(kind) as Agent[];
   }
 
   /**
@@ -444,20 +477,37 @@ export class Store {
     return res.changes > 0;
   }
 
-  upsertAgent(agent: { id: string; display_name: string; pubkey: string; permanent?: boolean; pronouns?: string }): void {
+  upsertAgent(agent: {
+    id: string;
+    display_name: string;
+    pubkey: string;
+    permanent?: boolean;
+    pronouns?: string;
+    kind?: AgentKind;
+  }): void {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, created_at, last_seen_at, reaped_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+      INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, kind, created_at, last_seen_at, reaped_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
       ON CONFLICT(id) DO UPDATE SET
         display_name = excluded.display_name,
         pubkey = excluded.pubkey,
         permanent = CASE WHEN excluded.permanent = 1 THEN 1 ELSE agents.permanent END,
         pronouns = COALESCE(excluded.pronouns, agents.pronouns),
+        kind = excluded.kind,
         last_seen_at = excluded.last_seen_at,
         created_at = excluded.created_at,
         reaped_at = NULL
-    `).run(agent.id, agent.display_name, agent.pubkey, agent.permanent ? 1 : 0, agent.pronouns ?? null, now, now);
+    `).run(
+      agent.id,
+      agent.display_name,
+      agent.pubkey,
+      agent.permanent ? 1 : 0,
+      agent.pronouns ?? null,
+      agent.kind ?? "agent",
+      now,
+      now,
+    );
   }
 
   isPermanent(agentId: string): boolean {

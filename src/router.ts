@@ -86,10 +86,12 @@ export class Router {
     // 1. Write-through: store first, get seq
     const stored = this.store.writeMessage(msg);
 
-    // 2. Determine recipients
+    // 2. Determine recipients. Broadcasts go to every identity — agents AND
+    //    integrations — since integrations subscribe to topics just like
+    //    agents do (e.g. wallet-vault subscribes to wallet.sign.response).
     const recipients = msg.dest
       ? [msg.dest]
-      : this.store.getAllAgents().map((a) => a.id);
+      : this.store.getAllAgents("all").map((a) => a.id);
 
     // 3. Attempt delivery to each recipient
     const deliveries: DeliveryResult[] = [];

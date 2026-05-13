@@ -350,7 +350,12 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
   // --- Agent Registry ---
 
   app.get("/agents", (c) => {
-    const agents = store.getAllAgents();
+    // ?kind=agent (default) | integration | all
+    const kindParam = c.req.query("kind");
+    const kind = kindParam === "integration" ? "integration"
+      : kindParam === "all" ? "all"
+      : "agent";
+    const agents = store.getAllAgents(kind);
     const result = agents.map((a) => {
       const online = emitter.isConnected(a.id) || store.hasConnectedSession(a.id);
       // connection_status drives dashboard rendering:
@@ -377,10 +382,15 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
   app.post("/agents/register", async (c) => {
     const body = await c.req.json();
-    const { id, display_name, pubkey, permanent, pronouns, force_rotate } = body;
+    const { id, display_name, pubkey, permanent, pronouns, force_rotate, kind } = body;
 
     if (!id || !display_name || !pubkey) {
       return c.json({ error: "missing required fields: id, display_name, pubkey" }, 400);
+    }
+
+    // Validate kind if provided; otherwise defaults to 'agent' in upsertAgent.
+    if (kind != null && kind !== "agent" && kind !== "integration") {
+      return c.json({ error: `invalid kind '${kind}'. Allowed: 'agent', 'integration'.` }, 400);
     }
 
     // getAgent now returns greyed agents too. Distinguish by reaped_at.
@@ -441,7 +451,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       pubkeyMatch: existing ? existing.pubkey === pubkey : null,
     }, `REGISTER ${id} via ${authPath}`);
 
-    store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent, pronouns });
+    store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent, pronouns, kind });
 
     return c.json({ agent_id: id, registered: true }, 201);
   });
@@ -843,7 +853,9 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       const validatorCode = webhook.validator;
 
       if (validatorCode && validatorCode !== "jwt-default") {
-        const agents = store.getAllAgents();
+        // Directory includes every identity (agents + integrations) — validators
+        // resolve sender pubkeys regardless of identity kind.
+        const agents = store.getAllAgents("all");
         const directory: Record<string, { pubkey: string; display_name: string }> = {};
         for (const a of agents) directory[a.id] = { pubkey: a.pubkey, display_name: a.display_name };
 
