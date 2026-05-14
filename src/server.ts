@@ -1034,6 +1034,103 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     return c.json({ deleted: id });
   });
 
+  // --- Plugin settings (generic KV per plugin namespace) ---
+
+  /**
+   * List all settings under a namespace.
+   * Public read — any consumer (extension, dashboard, agent) can fetch.
+   */
+  app.get("/plugin_settings/:namespace", (c) => {
+    const namespace = c.req.param("namespace");
+    return c.json(store.listPluginSettings(namespace));
+  });
+
+  /** Read a single setting key. */
+  app.get("/plugin_settings/:namespace/:key", (c) => {
+    const namespace = c.req.param("namespace");
+    const key = c.req.param("key");
+    const value = store.getPluginSetting(namespace, key);
+    if (value === null) return c.json({ error: "not found" }, 404);
+    return c.json({ namespace, key, value });
+  });
+
+  /**
+   * Write a setting. Auth: operator OR an authenticated agent whose ID
+   * matches the namespace (i.e. the wallet-vault integration writes the
+   * wallet-vault namespace; brioche cannot scribble on it).
+   */
+  app.put("/plugin_settings/:namespace/:key", async (c) => {
+    const namespace = c.req.param("namespace");
+    const key = c.req.param("key");
+
+    let writer: string;
+    if (isOperator(c)) {
+      writer = "operator";
+    } else {
+      const auth = await requireAuthenticatedAgent(c);
+      if (auth instanceof Response) return auth;
+      if (auth.agentId !== namespace) {
+        return c.json({
+          error: `agent '${auth.agentId}' cannot write namespace '${namespace}' (writer must be operator or match the namespace)`,
+        }, 403);
+      }
+      writer = auth.agentId;
+    }
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "body must be valid JSON" }, 400);
+    }
+    const value = (body as { value?: unknown })?.value;
+    if (value === undefined) {
+      return c.json({ error: "body.value is required" }, 400);
+    }
+
+    store.setPluginSetting(namespace, key, value, writer);
+
+    // Notify subscribers. Broadcast (no dest) so any agent or integration
+    // that subscribes to "plugin_settings.updated" gets the live mutation.
+    router.route({
+      source: "wire",
+      topic: "plugin_settings.updated",
+      payload: JSON.stringify({ namespace, key, value, updated_by: writer, updated_at: Date.now() }),
+    });
+
+    return c.json({ namespace, key, value, updated_by: writer });
+  });
+
+  /** Delete a setting. Same auth as PUT. */
+  app.delete("/plugin_settings/:namespace/:key", async (c) => {
+    const namespace = c.req.param("namespace");
+    const key = c.req.param("key");
+
+    let writer: string;
+    if (isOperator(c)) {
+      writer = "operator";
+    } else {
+      const auth = await requireAuthenticatedAgent(c);
+      if (auth instanceof Response) return auth;
+      if (auth.agentId !== namespace) {
+        return c.json({
+          error: `agent '${auth.agentId}' cannot delete from namespace '${namespace}'`,
+        }, 403);
+      }
+      writer = auth.agentId;
+    }
+
+    const removed = store.deletePluginSetting(namespace, key);
+    if (removed) {
+      router.route({
+        source: "wire",
+        topic: "plugin_settings.deleted",
+        payload: JSON.stringify({ namespace, key, deleted_by: writer, deleted_at: Date.now() }),
+      });
+    }
+    return c.json({ namespace, key, deleted: removed });
+  });
+
   // --- Dashboard ---
 
   app.get("/", (c) => {

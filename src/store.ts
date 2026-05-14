@@ -99,6 +99,21 @@ CREATE TABLE IF NOT EXISTS operators (
     created_at      INTEGER NOT NULL
 );
 
+-- Generic plugin settings KV. Namespaced by plugin (e.g. "wallet-vault") so
+-- multiple plugins can share the table without collisions. Value is JSON text.
+-- Writes are gated server-side: operator OR agent whose id == namespace.
+-- Mutations emit a wire message on topic "plugin_settings.updated" so live
+-- subscribers (extensions, dashboards) can refresh without polling.
+CREATE TABLE IF NOT EXISTS plugin_settings (
+    namespace   TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    updated_by  TEXT NOT NULL,
+    PRIMARY KEY (namespace, key)
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_settings_namespace ON plugin_settings(namespace);
+
 CREATE TABLE IF NOT EXISTS invites (
     code            TEXT PRIMARY KEY,
     created_by      TEXT NOT NULL REFERENCES operators(id),
@@ -474,6 +489,61 @@ export class Store {
     const res = this.db.prepare(
       "UPDATE agents SET reaped_at = NULL, last_seen_at = ? WHERE id = ? AND reaped_at IS NOT NULL",
     ).run(Date.now(), id);
+    return res.changes > 0;
+  }
+
+  // --- Plugin settings ---
+
+  /** Read a single setting. Returns parsed JSON value or null. */
+  getPluginSetting<T = unknown>(namespace: string, key: string): T | null {
+    const row = this.db.prepare(
+      "SELECT value FROM plugin_settings WHERE namespace = ? AND key = ?",
+    ).get(namespace, key) as { value: string } | null;
+    if (!row) return null;
+    try {
+      return JSON.parse(row.value) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Upsert a setting. Caller is responsible for auth (server route checks
+   * operator OR matching agent before invoking this).
+   */
+  setPluginSetting(namespace: string, key: string, value: unknown, updatedBy: string): void {
+    const json = JSON.stringify(value);
+    this.db.prepare(`
+      INSERT INTO plugin_settings (namespace, key, value, updated_at, updated_by)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(namespace, key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by
+    `).run(namespace, key, json, Date.now(), updatedBy);
+  }
+
+  /** List all key/value pairs within a namespace. */
+  listPluginSettings(namespace: string): Record<string, unknown> {
+    const rows = this.db.prepare(
+      "SELECT key, value FROM plugin_settings WHERE namespace = ? ORDER BY key",
+    ).all(namespace) as { key: string; value: string }[];
+    const out: Record<string, unknown> = {};
+    for (const r of rows) {
+      try {
+        out[r.key] = JSON.parse(r.value);
+      } catch {
+        out[r.key] = null;
+      }
+    }
+    return out;
+  }
+
+  /** Delete a setting. Returns true if a row was removed. */
+  deletePluginSetting(namespace: string, key: string): boolean {
+    const res = this.db.prepare(
+      "DELETE FROM plugin_settings WHERE namespace = ? AND key = ?",
+    ).run(namespace, key);
     return res.changes > 0;
   }
 
