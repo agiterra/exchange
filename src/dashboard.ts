@@ -279,6 +279,69 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       color: #a1a1aa;
     }
     .stat-value { color: #fafafa; font-weight: 600; }
+    /* Wallets panel */
+    .wallets-empty { color: #525252; font-size: 12px; padding: 12px 0; }
+    .wallet-row { border-bottom: 1px solid #141414; padding: 8px 0; }
+    .wallet-row:last-child { border-bottom: none; }
+    .wallet-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    .wallet-name { font-weight: 600; color: #fafafa; }
+    .wallet-addr { color: #6b7280; font-size: 11px; cursor: pointer; }
+    .wallet-addr:hover { color: #a1a1aa; }
+    .wallet-chain { color: #fbbf24; font-size: 11px; }
+    .wallet-creator { color: #525252; font-size: 11px; }
+    .wallet-mode-select {
+      background: #1a1a1a;
+      color: #e5e5e5;
+      border: 1px solid #262626;
+      border-radius: 3px;
+      padding: 2px 6px;
+      font-family: inherit;
+      font-size: 11px;
+    }
+    .wallet-members { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+    .wallet-member-chip {
+      background: #1a1a1a;
+      border: 1px solid #262626;
+      border-radius: 12px;
+      padding: 2px 4px 2px 8px;
+      font-size: 11px;
+      color: #a1a1aa;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .wallet-member-revoke {
+      cursor: pointer;
+      color: #525252;
+      padding: 0 4px;
+      border-radius: 50%;
+    }
+    .wallet-member-revoke:hover { color: #f87171; background: #262626; }
+    .wallet-grant {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .wallet-grant input {
+      width: 110px;
+      font-size: 11px;
+      padding: 1px 6px;
+      background: #0d0d0d;
+      border: 1px solid #262626;
+      color: #e5e5e5;
+      border-radius: 3px;
+    }
+    .wallet-grant button {
+      font-size: 11px;
+      padding: 1px 6px;
+      background: #1a1a1a;
+      border: 1px solid #262626;
+      color: #a1a1aa;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .wallet-grant button:hover { color: #4ade80; border-color: #4ade80; }
+    .wallet-access-disabled { color: #3f3f46; font-style: italic; font-size: 11px; }
     footer {
       margin-top: 32px;
       padding-top: 12px;
@@ -326,6 +389,11 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       ${agentRows}
     </tbody>
   </table>
+
+  <div class="form-section">
+    <h2>Wallets</h2>
+    <div id="wallets-panel" class="wallets-empty">Loading…</div>
+  </div>
 
   <div class="form-section">
     <div class="msg-log-header expanded" id="msg-log-header" onclick="this.classList.toggle('expanded')">
@@ -489,7 +557,17 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
     // SSE live messages
     evtSource.addEventListener('wire_message', (e) => {
-      addMessageEntry(JSON.parse(e.data));
+      const msg = JSON.parse(e.data);
+      addMessageEntry(msg);
+      // Live-refresh the Wallets panel when plugin_settings.wallet-vault.wallets
+      // changes (via operator edits here, or extension publishes elsewhere).
+      let parsed = msg.content;
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); } catch {}
+      }
+      if (window.refreshWalletsIfRelevant) {
+        window.refreshWalletsIfRelevant({ topic: msg.topic, payload: parsed });
+      }
     });
 
     // Backfill recent messages via REST (API returns oldest-first)
@@ -635,6 +713,125 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         }
       });
     }
+
+    // ---- Wallets panel ----
+    let walletsCache = {};
+
+    async function loadWallets() {
+      const panel = document.getElementById('wallets-panel');
+      try {
+        const res = await fetch('/plugin_settings/wallet-vault/wallets');
+        if (res.status === 404) {
+          walletsCache = {};
+          renderWallets();
+          return;
+        }
+        if (!res.ok) {
+          panel.textContent = 'Failed to load wallets (' + res.status + ')';
+          return;
+        }
+        const body = await res.json();
+        walletsCache = body.value || {};
+        renderWallets();
+      } catch (e) {
+        panel.textContent = 'Error loading wallets: ' + (e.message || e);
+      }
+    }
+
+    function renderWallets() {
+      const panel = document.getElementById('wallets-panel');
+      const addrs = Object.keys(walletsCache);
+      if (addrs.length === 0) {
+        panel.className = 'wallets-empty';
+        panel.textContent = '(no wallets yet)';
+        return;
+      }
+      panel.className = '';
+      panel.innerHTML = addrs.map(addr => {
+        const w = walletsCache[addr];
+        const name = w.operator_name || w.name;
+        const shortAddr = addr.slice(0, 8) + '…' + addr.slice(-6);
+        const accessControls = w.access.mode === 'all'
+          ? '<span class="wallet-access-disabled">all registered agents</span>'
+          : (w.access.mode === 'creator-only'
+              ? '<span class="wallet-access-disabled">creator only (' + esc(w.creator) + ')</span>'
+              : (w.access.agents.map(ag =>
+                  '<span class="wallet-member-chip">' + esc(ag) +
+                  '<span class="wallet-member-revoke" onclick="revokeAgent(\\''+addr+'\\',\\''+esc(ag)+'\\')" title="Revoke">×</span></span>'
+                ).join('') +
+                '<span class="wallet-grant"><input type="text" placeholder="agent-id" id="grant-'+addr+'"><button onclick="grantAgent(\\''+addr+'\\')">+grant</button></span>'));
+        return '<div class="wallet-row">' +
+          '<div class="wallet-head">' +
+            '<span class="wallet-name">' + esc(name) + '</span>' +
+            '<span class="wallet-addr copyable" onclick="copy(\\''+addr+'\\',this)" title="Click to copy">' + esc(shortAddr) + '</span>' +
+            '<span class="wallet-chain">chain ' + w.chain_id + '</span>' +
+            '<span class="wallet-creator">creator: ' + esc(w.creator) + '</span>' +
+            'mode: <select class="wallet-mode-select" onchange="setMode(\\''+addr+'\\',this.value)">' +
+              ['creator-only', 'specific', 'all'].map(m =>
+                '<option value="'+m+'"' + (w.access.mode === m ? ' selected' : '') + '>'+m+'</option>'
+              ).join('') +
+            '</select>' +
+          '</div>' +
+          '<div class="wallet-members">' + accessControls + '</div>' +
+        '</div>';
+      }).join('');
+    }
+
+    async function putWallets(updated) {
+      const res = await fetch('/plugin_settings/wallet-vault/wallets', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: updated }),
+      });
+      if (!res.ok) {
+        alert('Update failed (' + res.status + '): ' + await res.text().catch(() => ''));
+        return false;
+      }
+      return true;
+    }
+
+    async function grantAgent(addr) {
+      const input = document.getElementById('grant-' + addr);
+      const agentId = input.value.trim();
+      if (!agentId) return;
+      const next = JSON.parse(JSON.stringify(walletsCache));
+      const w = next[addr];
+      if (w.access.mode === 'creator-only') w.access.mode = 'specific';
+      if (!w.access.agents.includes(agentId)) w.access.agents.push(agentId);
+      if (await putWallets(next)) {
+        input.value = '';
+        await loadWallets();
+      }
+    }
+
+    async function revokeAgent(addr, agentId) {
+      const next = JSON.parse(JSON.stringify(walletsCache));
+      next[addr].access.agents = next[addr].access.agents.filter(a => a !== agentId);
+      if (await putWallets(next)) await loadWallets();
+    }
+
+    async function setMode(addr, mode) {
+      const next = JSON.parse(JSON.stringify(walletsCache));
+      next[addr].access.mode = mode;
+      if (await putWallets(next)) await loadWallets();
+    }
+
+    // Refresh wallets when plugin_settings.updated arrives via SSE.
+    // The dashboard's existing stream listener (further down) calls
+    // refreshWalletsIfRelevant on every message; expose it globally.
+    window.refreshWalletsIfRelevant = function(msg) {
+      if (msg && msg.topic === 'plugin_settings.updated' && msg.payload &&
+          msg.payload.namespace === 'wallet-vault' && msg.payload.key === 'wallets') {
+        walletsCache = msg.payload.value || {};
+        renderWallets();
+      } else if (msg && msg.topic === 'plugin_settings.deleted' && msg.payload &&
+          msg.payload.namespace === 'wallet-vault' && msg.payload.key === 'wallets') {
+        walletsCache = {};
+        renderWallets();
+      }
+    };
+
+    loadWallets();
 
     async function generateKeypair() {
       const kp = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
