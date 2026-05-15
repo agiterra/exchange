@@ -370,6 +370,17 @@ export class Store {
 
     // Index source_id on messages for dedup lookups
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_messages_source_id ON messages(source_id)");
+
+    // dependents_purged_at: tracks when an ephemeral's webhooks + sessions
+    // were cleaned up after soft-reap-grace expired. Identity stays
+    // permanent (no more hard-delete); this column lets the reaper skip
+    // ephemerals it's already cleaned up. Added 2026-05-15 with the
+    // no-hard-delete fix per Tim's
+    // .knowledge/feedback/wire-identity-never-hard-delete.md directive.
+    const agentCols5 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!agentCols5.some((c) => c.name === "dependents_purged_at")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN dependents_purged_at INTEGER");
+    }
   }
 
   // --- Messages ---
@@ -804,7 +815,18 @@ export class Store {
     ).run(messageSeq, agentId, Date.now(), result, error ?? null);
   }
 
-  // --- Agent lifecycle: soft-reap (grey) and hard-delete ---
+  // --- Agent lifecycle: soft-reap (grey) and ephemeral dependent cleanup ---
+  //
+  // Identity is permanent. Agent rows (id, pubkey, display_name, kind) are
+  // NEVER deleted. When an agent disconnects we transition `reaped_at`
+  // (grey). For ephemerals past the delete-grace we also purge their
+  // webhooks + dead sessions, but the agent row itself stays so they can
+  // re-register and resume (same id, same pubkey, in-memory private key
+  // still matches → seamless recovery).
+  //
+  // Per Tim 2026-05-15 (`.knowledge/feedback/wire-identity-never-hard-delete.md`):
+  //   "Fondant should not be hard-deleting anyone, ever. A status should
+  //    change, is all, like 'disconnected' versus 'reaped' or something."
 
   /**
    * Soft-reap candidates: agents that should be greyed-out in the dashboard.
@@ -841,25 +863,37 @@ export class Store {
   }
 
   /**
-   * Hard-delete candidates: ephemeral agents that have been greyed-out for
-   * longer than `deleteGraceMs` (default 1h). Permanent agents are never
-   * hard-deleted — they stay greyed indefinitely until they re-register.
+   * Dependent-purge candidates: ephemeral agents greyed-out for longer than
+   * `deleteGraceMs` (default 1h) whose dependent rows (webhooks, dead
+   * sessions) haven't been cleaned up yet. Permanent agents are excluded —
+   * their dependents stay around indefinitely so they can reconnect cleanly.
+   *
+   * The agent row itself stays regardless. This query just identifies who
+   * still needs webhook teardown + session purge.
    */
-  getHardDeleteCandidates(deleteGraceMs: number): string[] {
+  getDependentPurgeCandidates(deleteGraceMs: number): string[] {
     const cutoff = Date.now() - deleteGraceMs;
     return (this.db.prepare(`
       SELECT id FROM agents
       WHERE permanent = 0
         AND reaped_at IS NOT NULL
         AND reaped_at < ?
+        AND dependents_purged_at IS NULL
     `).all(cutoff) as { id: string }[]).map((r) => r.id);
   }
 
-  /** Hard-delete an agent and its dependent rows. */
-  hardDeleteAgent(id: string): void {
+  /**
+   * Purge dependent rows (webhooks, dead sessions) for a reaped ephemeral.
+   * The agent row itself is preserved — identity stays permanent so the
+   * agent can re-register later with the same pubkey and resume.
+   *
+   * Idempotent: sets `dependents_purged_at` so the reaper skips this agent
+   * on subsequent ticks.
+   */
+  purgeAgentDependents(id: string): void {
     this.db.prepare("DELETE FROM webhooks WHERE agent_id = ?").run(id);
     this.db.prepare("DELETE FROM agent_sessions WHERE agent_id = ?").run(id);
-    this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    this.db.prepare("UPDATE agents SET dependents_purged_at = ? WHERE id = ?").run(Date.now(), id);
   }
 
   /**

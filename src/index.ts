@@ -56,11 +56,16 @@ const dbPath = process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
 const staleMs = parseInt(process.env.STALE_MS ?? "20000", 10);
 const disconnectMs = parseInt(process.env.DISCONNECT_MS ?? "30000", 10);
 const reconcilerIntervalMs = parseInt(process.env.RECONCILER_INTERVAL_MS ?? "10000", 10);
-// Lifecycle (v1.2.0): two-phase reap.
-//   reapGraceMs   — agent goes greyed-out after this long with no session heartbeat
-//                   (and at least this long after register, for never-connected agents)
-//   deleteGraceMs — ephemeral agents are hard-deleted this long after going greyed
-//                   (permanent agents stay greyed indefinitely until they re-register)
+// Lifecycle: two-phase reap. Identity stays permanent in both phases —
+// agent rows are NEVER hard-deleted (per Tim's never-hard-delete directive,
+// 2026-05-15).
+//   reapGraceMs   — agent goes greyed-out after this long with no session
+//                   heartbeat (and at least this long after register, for
+//                   never-connected agents)
+//   deleteGraceMs — ephemeral agents' dependent rows (webhooks, dead sessions)
+//                   get purged this long after going greyed. Permanent agents'
+//                   dependents are never purged — they keep state for a clean
+//                   reconnect later.
 const reapGraceMs = parseInt(process.env.REAP_GRACE_MS ?? "20000", 10);
 const deleteGraceMs = parseInt(process.env.DELETE_GRACE_MS ?? "3600000", 10);
 
@@ -170,11 +175,19 @@ setInterval(() => {
     log.info({ event: "agent_soft_reap", agent: agentId }, `agent ${agentId} → greyed`);
   }
 
-  // --- Pass 2: hard-delete greyed ephemerals past the delete grace ---
-  // Permanent agents are excluded by the query — they stay greyed forever
-  // until they re-register. Run webhook cleanup before deleting.
-  const hardDeleteIds = store.getHardDeleteCandidates(deleteGraceMs);
-  for (const agentId of hardDeleteIds) {
+  // --- Pass 2: purge dependents of greyed ephemerals past the delete grace ---
+  // Identity (agent row) is permanent and stays. We purge only the
+  // ephemeral's webhooks (running their cleanup callbacks first to
+  // tear down external state) and dead sessions. After purge, the agent
+  // can still re-register at any time using the same id + pubkey and
+  // pick up cleanly (no zombie sessions, no stale webhooks).
+  //
+  // Permanent agents are excluded by the query — their dependents stay.
+  // The query also excludes agents whose dependents have already been
+  // purged (`dependents_purged_at IS NOT NULL`), so this is idempotent
+  // across reconciler ticks.
+  const purgeIds = store.getDependentPurgeCandidates(deleteGraceMs);
+  for (const agentId of purgeIds) {
     const webhooks = store.getWebhooksForAgent(agentId);
     for (const wh of webhooks) {
       if (wh.cleanup) {
@@ -187,8 +200,8 @@ setInterval(() => {
         });
       }
     }
-    store.hardDeleteAgent(agentId);
-    log.info({ event: "agent_hard_delete", agent: agentId }, `agent ${agentId} → deleted`);
+    store.purgeAgentDependents(agentId);
+    log.info({ event: "agent_dependents_purged", agent: agentId }, `agent ${agentId} dependents purged (identity preserved)`);
   }
 }, reconcilerIntervalMs);
 
