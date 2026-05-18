@@ -629,10 +629,34 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
           // "Wire connection LOST / RESTORED" channel notification pair
           // and looks like a flap to operators. 30s interval is well
           // under the 300s client timeout and ngrok's ~256s idle close.
+          // Real SSE event-frame keepalive. SSE comments (`:`-prefixed
+          // lines) don't transit reliably — tested 1KB and 32KB padded
+          // comment forms; both fire on the server (sse_keepalive
+          // logged every 30s) but never reach the client (verified via
+          // direct localhost curl AND by the 300s silence-timeout
+          // continuing to fire on all real clients).
+          //
+          // Event-frame keepalives DO transit. The data payload is a
+          // Wire-envelope-shaped JSON with topic `wire.keepalive` —
+          // wire-tools v2.6.3+ filters this topic from delivery so it
+          // never appears as a channel notification. Older wire-tools
+          // clients will see a phantom notification per ping; the fix
+          // is on the wire-tools side. Document in the release note.
+          let keepaliveCount = 0;
           const keepalive = setInterval(() => {
             try {
-              controller.enqueue(encoder.encode(": keepalive\n\n"));
-            } catch {
+              const data = JSON.stringify({
+                seq: 0,
+                source: "wire",
+                topic: "wire.keepalive",
+                payload: null,
+                created_at: Date.now(),
+              });
+              controller.enqueue(encoder.encode(`event: keepalive\ndata: ${data}\n\n`));
+              keepaliveCount++;
+              log.debug({ event: "sse_keepalive", agentId, sessionId, count: keepaliveCount }, "SSE keepalive sent");
+            } catch (e) {
+              log.warn({ event: "sse_keepalive_fail", agentId, sessionId, err: String(e) }, "SSE keepalive failed");
               clearInterval(keepalive);
             }
           }, 30_000);
