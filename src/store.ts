@@ -237,6 +237,7 @@ export type Webhook = {
   meta: string | null;
   cleanup: string | null;
   dedup: string | null;
+  emit: string | null;
   created_at: number;
 };
 
@@ -380,6 +381,18 @@ export class Store {
     const agentCols5 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
     if (!agentCols5.some((c) => c.name === "dependents_purged_at")) {
       this.db.exec("ALTER TABLE agents ADD COLUMN dependents_purged_at INTEGER");
+    }
+
+    // emit: post-delivery side-effect JS for webhooks. Runs after the
+    // inbound message is routed; returns an array of follow-up envelopes
+    // {topic, dest?, payload} to inject through the router. Used by e.g.
+    // github-tools to auto-emit a `rebase-needed` IPC alert when a PR's
+    // mergeable_state goes dirty — without the agent having to remember
+    // to call check_pr_rebase. Added 2026-05-18 per Tim's directive that
+    // rebase detection "should NOT be agent-called."
+    const whCols3 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    if (!whCols3.some((c) => c.name === "emit")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN emit TEXT");
     }
   }
 
@@ -765,15 +778,16 @@ export class Store {
     meta?: string;
     cleanup?: string;
     dedup?: string;
+    emit?: string;
   }): number {
     const now = Date.now();
     const result = this.db.prepare(`
-      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.agentId, opts.plugin, opts.name,
       opts.validator ?? null, opts.secretsMap ?? null,
-      opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, now,
+      opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, opts.emit ?? null, now,
     );
     return Number(result.lastInsertRowid);
   }

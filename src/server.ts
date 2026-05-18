@@ -623,6 +623,20 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
           emitter.register(agentId, sessionId!, writer);
           writer.write(": connected\n\n");
 
+          // Periodic SSE keepalive comment. Without this, idle agents
+          // (no inbound messages) hit wire-tools' 300s silence-timeout
+          // every ~5 minutes and reconnect — which fires the
+          // "Wire connection LOST / RESTORED" channel notification pair
+          // and looks like a flap to operators. 30s interval is well
+          // under the 300s client timeout and ngrok's ~256s idle close.
+          const keepalive = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(": keepalive\n\n"));
+            } catch {
+              clearInterval(keepalive);
+            }
+          }, 30_000);
+
           const session = store.getSession(sessionId!);
           const replaySeq = session?.last_ack_seq ?? 0;
           log.info({ event: "sse_replay", agentId, sessionId, fromSeq: replaySeq }, "SSE replaying backlog");
@@ -630,6 +644,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
           c.req.raw.signal.addEventListener("abort", () => {
             log.info({ event: "sse_abort", agentId, sessionId }, "SSE client disconnected");
+            clearInterval(keepalive);
             emitter.unregister(agentId, sessionId!);
           });
         },
