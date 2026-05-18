@@ -1055,21 +1055,21 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
   // --- Plugin settings (generic KV per plugin namespace) ---
 
   /**
-   * List all settings under a namespace. Auth required — namespaces can
-   * contain sensitive data (e.g. wallet directory entries). Any registered
-   * agent or operator can read.
+   * List all settings under a namespace.
+   * Public read by design — namespaces are broadcast-friendly. The
+   * wallet-vault directory specifically is consumed by the browser
+   * extension (kind=integration) which doesn't carry a signing key for
+   * casual reads, and by any dashboard. INTEGRITY (writes) is gated by
+   * namespace ownership (PUT/DELETE require requireAuthenticatedAgent
+   * below) — that's where the security boundary lives.
    */
-  app.get("/plugin_settings/:namespace", async (c) => {
-    const err = await requireAgentOrOperator(c);
-    if (err) return err;
+  app.get("/plugin_settings/:namespace", (c) => {
     const namespace = c.req.param("namespace");
     return c.json(store.listPluginSettings(namespace));
   });
 
-  /** Read a single setting key. Auth required (see above). */
-  app.get("/plugin_settings/:namespace/:key", async (c) => {
-    const err = await requireAgentOrOperator(c);
-    if (err) return err;
+  /** Read a single setting key. Public read — see above. */
+  app.get("/plugin_settings/:namespace/:key", (c) => {
     const namespace = c.req.param("namespace");
     const key = c.req.param("key");
     const value = store.getPluginSetting(namespace, key);
