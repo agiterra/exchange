@@ -1133,12 +1133,13 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     const operator = operatorId ? store.getOperator(operatorId) : null;
     const displayName = operator?.display_name ?? "Operator";
 
-    // Hide reaped agents from the dashboard. Identity rows stay in the DB
-    // (permanent per Tim's never-hard-delete directive); when an agent comes
-    // back with the same pubkey, the existing row is un-greyed via the
-    // reaped-readmission auth path and they reappear here automatically.
+    // Hide reaped EPHEMERAL agents — they're transient and clutter the
+    // dashboard. Reaped PERMANENT agents (personai) stay visible (greyed)
+    // so operators see their persistent team at a glance even when not
+    // currently running. All identity rows stay in the DB; reaped-
+    // readmission un-greys both kinds on next register/connect/heartbeat.
     const agents = store.getAllAgents()
-      .filter((a) => a.reaped_at == null)
+      .filter((a) => a.reaped_at == null || a.permanent === 1)
       .map((a) => ({
         ...a,
         online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
@@ -1195,11 +1196,12 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
             try { controller.enqueue(encoder.encode(data)); } catch {}
           };
 
-          // Send initial state. Hide reaped agents — they stay in the DB
-          // for identity preservation but don't clutter the dashboard.
+          // Send initial state. Hide reaped EPHEMERAL agents — they're
+          // transient debris. Keep reaped permanents (personai) visible,
+          // greyed, so operators see their team at a glance.
           const sendState = () => {
             const agents = store.getAllAgents()
-              .filter((a) => a.reaped_at == null)
+              .filter((a) => a.reaped_at == null || a.permanent === 1)
               .map((a) => ({
                 ...a,
                 online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
