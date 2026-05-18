@@ -556,8 +556,16 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
   // --- Temporal Query ---
 
-  app.get("/agents/:id/recent", (c) => {
+  app.get("/agents/:id/recent", async (c) => {
     const agentId = c.req.param("id");
+
+    // Reading another agent's message history is sensitive — payloads
+    // can carry anything. Require the target agent's JWT or operator auth.
+    if (!isOperator(c)) {
+      const err = await requireAgent(c, agentId);
+      if (err) return err;
+    }
+
     const minutes = parseInt(c.req.query("minutes") ?? "10", 10);
     const limit = parseInt(c.req.query("limit") ?? "100", 10);
     const cutoff = Date.now() - minutes * 60_000;
@@ -1001,6 +1009,11 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
   // --- Scheduled Heartbeats ---
 
   app.post("/heartbeats", async (c) => {
+    // Scheduling a heartbeat is effectively scheduling a recurring prompt
+    // injection into the target agent. Must be authenticated.
+    const err = await requireAgentOrOperator(c);
+    if (err) return err;
+
     const body = await c.req.json() as {
       agent_id: string;
       cron: string;
@@ -1021,12 +1034,19 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     return c.json(hb);
   });
 
-  app.get("/heartbeats", (c) => {
+  app.get("/heartbeats", async (c) => {
+    // Listing heartbeats reveals scheduled prompts (which can include
+    // sensitive instructions). Require auth.
+    const err = await requireAgentOrOperator(c);
+    if (err) return err;
     const agentId = c.req.query("agent_id");
     return c.json(store.listHeartbeats(agentId ?? undefined));
   });
 
-  app.delete("/heartbeats/:id", (c) => {
+  app.delete("/heartbeats/:id", async (c) => {
+    // Deleting another agent's scheduled prompts is a mutation; require auth.
+    const err = await requireAgentOrOperator(c);
+    if (err) return err;
     const id = c.req.param("id");
     heartbeats.remove(id);
     return c.json({ deleted: id });
@@ -1035,16 +1055,21 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
   // --- Plugin settings (generic KV per plugin namespace) ---
 
   /**
-   * List all settings under a namespace.
-   * Public read — any consumer (extension, dashboard, agent) can fetch.
+   * List all settings under a namespace. Auth required — namespaces can
+   * contain sensitive data (e.g. wallet directory entries). Any registered
+   * agent or operator can read.
    */
-  app.get("/plugin_settings/:namespace", (c) => {
+  app.get("/plugin_settings/:namespace", async (c) => {
+    const err = await requireAgentOrOperator(c);
+    if (err) return err;
     const namespace = c.req.param("namespace");
     return c.json(store.listPluginSettings(namespace));
   });
 
-  /** Read a single setting key. */
-  app.get("/plugin_settings/:namespace/:key", (c) => {
+  /** Read a single setting key. Auth required (see above). */
+  app.get("/plugin_settings/:namespace/:key", async (c) => {
+    const err = await requireAgentOrOperator(c);
+    if (err) return err;
     const namespace = c.req.param("namespace");
     const key = c.req.param("key");
     const value = store.getPluginSetting(namespace, key);
