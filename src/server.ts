@@ -431,10 +431,18 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       if (err) return err;
     } else {
       authPath = isGreyed ? "reaped-readmission" : "new-ephemeral";
-      // Greyed ephemeral with matching pubkey: same agent waking up; let them back in.
+      // Greyed ephemeral phoning home with the matching pubkey: must prove
+      // possession of the private key. Body's pubkey field is just
+      // declarative — without verifying the JWT signature against the
+      // stored pubkey we'd accept any caller who scraped the public key
+      // from /agents?kind=all. The endpoint would still be a no-op in
+      // practice (clearReap only fires on /connect and /heartbeat, both
+      // gated by JWT), but registers should require auth as a hard rule.
+      //
       // Truly new ephemeral: requires sponsor or operator auth.
       if (isGreyed && existing!.pubkey === pubkey) {
-        // pubkey already matches (we'd have rejected mismatch above without force_rotate)
+        const err = await requireAgent(c, id);
+        if (err) return err;
       } else {
         const err = await requireAgentOrOperator(c);
         if (err) return err;
