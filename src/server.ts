@@ -1133,11 +1133,17 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     const operator = operatorId ? store.getOperator(operatorId) : null;
     const displayName = operator?.display_name ?? "Operator";
 
-    const agents = store.getAllAgents().map((a) => ({
-      ...a,
-      online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
-      sessions: store.getActiveSessions(a.id).length,
-    }));
+    // Hide reaped agents from the dashboard. Identity rows stay in the DB
+    // (permanent per Tim's never-hard-delete directive); when an agent comes
+    // back with the same pubkey, the existing row is un-greyed via the
+    // reaped-readmission auth path and they reappear here automatically.
+    const agents = store.getAllAgents()
+      .filter((a) => a.reaped_at == null)
+      .map((a) => ({
+        ...a,
+        online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
+        sessions: store.getActiveSessions(a.id).length,
+      }));
 
     // Set token cookie if auth was via query param (so subsequent fetches are auto-authenticated)
     const tokenParam = new URL(c.req.url).searchParams.get("token");
@@ -1189,13 +1195,16 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
             try { controller.enqueue(encoder.encode(data)); } catch {}
           };
 
-          // Send initial state
+          // Send initial state. Hide reaped agents — they stay in the DB
+          // for identity preservation but don't clutter the dashboard.
           const sendState = () => {
-            const agents = store.getAllAgents().map((a) => ({
-              ...a,
-              online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
-              sessions: store.getActiveSessions(a.id).length,
-            }));
+            const agents = store.getAllAgents()
+              .filter((a) => a.reaped_at == null)
+              .map((a) => ({
+                ...a,
+                online: emitter.isConnected(a.id) || store.hasConnectedSession(a.id),
+                sessions: store.getActiveSessions(a.id).length,
+              }));
             write(`data: ${JSON.stringify(agents)}\n\n`);
           };
 
