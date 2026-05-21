@@ -36,7 +36,14 @@ CREATE TABLE IF NOT EXISTS agents (
     -- codex agent, operator). Other kinds (e.g. 'integration') share the same
     -- Ed25519 + JWT + SSE plumbing but are filtered out of the default agent
     -- list so they don't pollute the crew dashboard.
-    kind            TEXT NOT NULL DEFAULT 'agent'
+    kind            TEXT NOT NULL DEFAULT 'agent',
+    -- Per-agent replay cursor. Stamped at first registration to the then-current
+    -- MAX(seq) so brand-new agents don't get dumped historical broadcasts, and
+    -- write-through-updated from every session ack so it survives session
+    -- purge — reconcileSessions deletes disconnected sessions after
+    -- disconnectMs, which used to strand the cursor and silently skip backlog
+    -- on the agent's next reconnect (the SSE-replay-on-connect bug fixed here).
+    last_seen_seq   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -383,6 +390,18 @@ export class Store {
       this.db.exec("ALTER TABLE agents ADD COLUMN dependents_purged_at INTEGER");
     }
 
+    // last_seen_seq: per-agent replay cursor (see CREATE TABLE comment). Before
+    // this column existed, createSession's fallback for agents with no live
+    // sessions read global MAX(seq), which silently skipped all queued backlog
+    // when an agent reconnected after session-purge. Backfill existing rows to
+    // current MAX(seq) so the first post-deploy connect matches new-agent
+    // behavior — one last skipped backlog, documented in the release notes.
+    const agentCols6 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!agentCols6.some((c) => c.name === "last_seen_seq")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN last_seen_seq INTEGER NOT NULL DEFAULT 0");
+      this.db.exec("UPDATE agents SET last_seen_seq = COALESCE((SELECT MAX(seq) FROM messages), 0)");
+    }
+
     // emit: post-delivery side-effect JS for webhooks. Runs after the
     // inbound message is routed; returns an array of follow-up envelopes
     // {topic, dest?, payload} to inject through the router. Used by e.g.
@@ -581,8 +600,8 @@ export class Store {
   }): void {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, kind, created_at, last_seen_at, reaped_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, kind, created_at, last_seen_at, reaped_at, last_seen_seq)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, COALESCE((SELECT MAX(seq) FROM messages), 0))
       ON CONFLICT(id) DO UPDATE SET
         display_name = excluded.display_name,
         pubkey = excluded.pubkey,
@@ -627,9 +646,14 @@ export class Store {
   createSession(agentId: string, runtime = "claude-code", contextId?: string): AgentSession {
     const id = crypto.randomUUID();
     const now = Date.now();
+    // Inherit the cursor from agents.last_seen_seq — the per-agent persisted
+    // watermark — NOT from agent_sessions, which gets purged after
+    // disconnectMs and would strand the cursor. Also NOT from global MAX(seq),
+    // which would cause every reconnecting agent to silently skip queued
+    // backlog (the SSE-replay-on-connect bug).
     this.db.prepare(`
       INSERT INTO agent_sessions (id, agent_id, runtime, connected_at, last_ack_seq, updated_at, last_heartbeat, status, cc_session_id)
-      VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(last_ack_seq), (SELECT MAX(seq) FROM messages)) FROM agent_sessions WHERE agent_id = ?), ?, ?, 'connected', ?)
+      VALUES (?, ?, ?, ?, (SELECT last_seen_seq FROM agents WHERE id = ?), ?, ?, 'connected', ?)
     `).run(id, agentId, runtime, now, agentId, now, now, contextId ?? null);
     return this.getSession(id)!;
   }
@@ -674,9 +698,15 @@ export class Store {
   }
 
   ackSession(sessionId: string, seq: number): void {
+    const now = Date.now();
     this.db.prepare(
       "UPDATE agent_sessions SET last_ack_seq = MAX(last_ack_seq, ?), updated_at = ? WHERE id = ?"
-    ).run(seq, Date.now(), sessionId);
+    ).run(seq, now, sessionId);
+    // Write-through to agents.last_seen_seq so the cursor survives session
+    // purge — createSession reads from agents on next reconnect.
+    this.db.prepare(
+      "UPDATE agents SET last_seen_seq = MAX(last_seen_seq, ?) WHERE id = (SELECT agent_id FROM agent_sessions WHERE id = ?)"
+    ).run(seq, sessionId);
   }
 
   heartbeatSession(sessionId: string): void {
