@@ -355,7 +355,14 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     const kind = kindParam === "integration" ? "integration"
       : kindParam === "all" ? "all"
       : "agent";
-    const agents = store.getAllAgents(kind);
+    // ?include_reaped=1 — include reaped (greyed) agents in the response.
+    // Default behavior excludes them: enumerating live agents is the
+    // 99% case and the default shouldn't mislead (37-vs-1 surprise on
+    // 2026-05-26 from Tim). Dashboards / audit views opt in explicitly.
+    const includeReaped = c.req.query("include_reaped") === "1";
+    const agents = store.getAllAgents(kind).filter(
+      (a) => includeReaped || a.reaped_at == null,
+    );
     const result = agents.map((a) => {
       const online = emitter.isConnected(a.id) || store.hasConnectedSession(a.id);
       // connection_status drives dashboard rendering:
