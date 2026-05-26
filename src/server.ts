@@ -1013,6 +1013,18 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((v, k) => { headers[k] = v; });
 
+    // Require an explicit broadcast-intent header. The same JWT-signed body
+    // would otherwise also reach /webhooks/<dest>/<topic> for unicast; the
+    // header forces callers to declare "yes, I really mean to fan out to
+    // every subscriber on this topic." Prevents the silent-broadcast pattern
+    // where omitting `dest` in an SDK call lands status updates in every
+    // ipc-subscriber's inbox (the Tarte 2026-05-26 firehose case).
+    if (headers["x-wire-broadcast"] !== "1") {
+      return c.json({
+        error: "broadcast requires explicit intent header 'X-Wire-Broadcast: 1' (prevents silent fan-out via accidental omitted dest)",
+      }, 400);
+    }
+
     let source: string;
     try {
       const { sender } = await verifyJwt(headers, rawBody, store);
