@@ -68,6 +68,11 @@ const reconcilerIntervalMs = parseInt(process.env.RECONCILER_INTERVAL_MS ?? "100
 //                   reconnect later.
 const reapGraceMs = parseInt(process.env.REAP_GRACE_MS ?? "20000", 10);
 const deleteGraceMs = parseInt(process.env.DELETE_GRACE_MS ?? "3600000", 10);
+// Webhook janitor: any webhook whose owning agent has no session that has
+// heartbeated within this window is swept (cleanup JS runs, row deleted).
+// Applies to both ephemerals and permanent agents — permanents re-register
+// their webhooks on reconnect. Default matches deleteGraceMs (1h).
+const webhookStaleMs = parseInt(process.env.WEBHOOK_STALE_MS ?? "3600000", 10);
 
 export const log = pino({ name: "wire" });
 
@@ -202,6 +207,27 @@ setInterval(() => {
     }
     store.purgeAgentDependents(agentId);
     log.info({ event: "agent_dependents_purged", agent: agentId }, `agent ${agentId} dependents purged (identity preserved)`);
+  }
+
+  // --- Webhook janitor ---
+  // Sweep webhooks whose owning agent has no session heartbeating within
+  // `webhookStaleMs`. Re-runnable per tick: catches webhooks registered AFTER
+  // an ephemeral's one-shot dependent purge (the Madeleine/Tiramisu orphan
+  // case from 2026-05), and also cleans webhooks belonging to permanent
+  // agents that have gone offline (they can re-register on reconnect).
+  const staleWebhooks = store.getStaleWebhooks(webhookStaleMs);
+  for (const wh of staleWebhooks) {
+    if (wh.cleanup) {
+      const secrets = wh.secrets_map ? JSON.parse(wh.secrets_map) : {};
+      const meta = wh.meta ? JSON.parse(wh.meta) : {};
+      runCleanup(wh.cleanup, { meta, secrets }).then(() => {
+        log.info({ event: "webhook_janitor_cleanup_ok", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name }, "janitor: webhook cleanup ok");
+      }).catch((e) => {
+        log.error({ event: "webhook_janitor_cleanup_error", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name, err: e }, "janitor: webhook cleanup error");
+      });
+    }
+    store.deleteWebhook(wh.id);
+    log.info({ event: "webhook_janitor_swept", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name }, `janitor: swept stale webhook ${wh.id} (${wh.agent_id}/${wh.plugin}/${wh.name})`);
   }
 }, reconcilerIntervalMs);
 

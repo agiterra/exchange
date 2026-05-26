@@ -826,6 +826,33 @@ export class Store {
     this.db.prepare("DELETE FROM webhooks WHERE id = ?").run(id);
   }
 
+  /**
+   * Webhooks whose owning agent has no session that heartbeated within
+   * `staleMs`. Both ephemeral and permanent agents are included — when a
+   * permanent agent goes offline its webhooks become orphans too, and it can
+   * re-register them on reconnect.
+   *
+   * Newly-registered agents that haven't opened a session yet are excluded
+   * via `webhooks.created_at < cutoff`, so webhooks registered seconds ago
+   * aren't immediately swept on a slow first session-open.
+   *
+   * Re-runnable per tick: no `dependents_purged_at` gate. The orphan webhooks
+   * for Madeleine and Tiramisu in mid-2026-05 came from exactly that gate —
+   * once an ephemeral was purged once and later re-registered webhooks, the
+   * old reaper never revisited it.
+   */
+  getStaleWebhooks(staleMs: number): Webhook[] {
+    const cutoff = Date.now() - staleMs;
+    return this.db.prepare(`
+      SELECT w.* FROM webhooks w
+      WHERE w.created_at < ?
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_sessions s
+          WHERE s.agent_id = w.agent_id AND s.last_heartbeat > ?
+        )
+    `).all(cutoff, cutoff) as Webhook[];
+  }
+
   deleteWebhooksForAgent(agentId: string, plugin?: string): void {
     if (plugin) {
       this.db.prepare("DELETE FROM webhooks WHERE agent_id = ? AND plugin = ?").run(agentId, plugin);
