@@ -964,12 +964,15 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       }
     }
 
-    // Build envelope and route
+    // Build envelope and route. When the inbound matched a registered
+    // webhook row, surface its id + name so receivers can self-cleanup
+    // (e.g. github-claude-code unregistering on pull_request.closed).
     const envelope = {
       source,
       topic,
       dest: agentId,
       plugin,
+      ...(webhook ? { webhook_id: webhook.id, webhook_name: webhook.name } : {}),
       headers,
       payload: parsedBody,
     };
