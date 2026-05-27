@@ -825,7 +825,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     if (err) return err;
 
     const body = await c.req.json();
-    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup, session_id } = body;
+    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup, session_id, responder } = body;
 
     if (!plugin) {
       return c.json({ error: "missing plugin" }, 400);
@@ -857,6 +857,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       cleanup: cleanup ?? undefined,
       dedup: dedup ?? undefined,
       sessionId: typeof session_id === "string" && session_id.length > 0 ? session_id : undefined,
+      responder: typeof responder === "string" && responder.length > 0 ? responder : undefined,
     });
 
     return c.json({
@@ -939,6 +940,25 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
           source = sender;
         } catch (e) {
           return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
+        }
+      }
+
+      // Responder: post-validator, pre-route. Plugin-provided JS that can
+      // short-circuit with a custom HTTP response (e.g. handshake echoes).
+      // Wire treats the code as opaque — protocol-specific handling lives
+      // in whichever tools package generated it.
+      if (webhook.responder) {
+        try {
+          const result = await runResponder(webhook.responder, {
+            headers, body: rawBody, parsedBody, secrets,
+          });
+          if (result !== null && result !== undefined) {
+            const r = result as { body?: unknown; status?: number };
+            const status = (r.status ?? 200) as 200;
+            return c.json(r.body ?? {}, status);
+          }
+        } catch (e) {
+          return c.json({ error: "responder error", detail: String(e) }, 500);
         }
       }
 
@@ -1464,6 +1484,22 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   });
 
   return server;
+}
+
+// --- Webhook Responder (VM-lite, post-validator short-circuit) ---
+
+async function runResponder(
+  code: string,
+  ctx: {
+    headers: Record<string, string>;
+    body: string;
+    parsedBody: unknown;
+    secrets: Record<string, string>;
+  },
+): Promise<unknown> {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const fn = new AsyncFunction("headers", "body", "parsedBody", "secrets", code);
+  return await fn(ctx.headers, ctx.body, ctx.parsedBody, ctx.secrets);
 }
 
 // --- Webhook Validator (VM-lite) ---

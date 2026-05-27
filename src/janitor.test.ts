@@ -124,6 +124,26 @@ describe("getStaleWebhooks — janitor query", () => {
     expect(gotAgentScoped?.session_id).toBeNull();
   });
 
+  test("responder column round-trips opaque JS string", () => {
+    makeAgent("withResp");
+    const responderJs = "return parsedBody?.type === 'x' ? { body: { ok: true } } : null;";
+    const wid = store.createWebhook({
+      agentId: "withResp",
+      plugin: "test",
+      name: "rt",
+      responder: responderJs,
+    });
+    const got = store.getWebhookById(wid);
+    expect(got?.responder).toBe(responderJs);
+
+    const widNo = store.createWebhook({
+      agentId: "withResp",
+      plugin: "test",
+      name: "rt-no",
+    });
+    expect(store.getWebhookById(widNo)?.responder).toBeNull();
+  });
+
   test("re-runnable: dependents_purged_at being set does NOT exempt orphans (Madeleine/Tiramisu bug)", () => {
     makeAgent("returning-ephemeral");
     // Simulate the post-purge state: agent was purged once, then registered a

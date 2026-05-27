@@ -246,6 +246,7 @@ export type Webhook = {
   dedup: string | null;
   emit: string | null;
   session_id: string | null;
+  responder: string | null;
   created_at: number;
 };
 
@@ -424,6 +425,19 @@ export class Store {
     const whCols4 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
     if (!whCols4.some((c) => c.name === "session_id")) {
       this.db.exec("ALTER TABLE webhooks ADD COLUMN session_id TEXT");
+    }
+
+    // responder: post-validator, pre-route hook. Plugin-provided JS that
+    // runs AFTER the validator passes; if it returns a non-null value,
+    // wire short-circuits with that as the HTTP response body and skips
+    // normal channel delivery. Used by webhook sources that need to
+    // satisfy a synchronous handshake on the same URL — e.g. Slack's
+    // url_verification POST. Same sandbox shape as validator/filter/
+    // cleanup/emit: opaque string, wire knows nothing about its contents.
+    // Null = continue normal flow (filter → route). Issue agiterra/wire#25.
+    const whCols5 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    if (!whCols5.some((c) => c.name === "responder")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN responder TEXT");
     }
   }
 
@@ -822,16 +836,17 @@ export class Store {
     dedup?: string;
     emit?: string;
     sessionId?: string;
+    responder?: string;
   }): number {
     const now = Date.now();
     const result = this.db.prepare(`
-      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, session_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, session_id, responder, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.agentId, opts.plugin, opts.name,
       opts.validator ?? null, opts.secretsMap ?? null,
       opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, opts.emit ?? null,
-      opts.sessionId ?? null, now,
+      opts.sessionId ?? null, opts.responder ?? null, now,
     );
     return Number(result.lastInsertRowid);
   }
