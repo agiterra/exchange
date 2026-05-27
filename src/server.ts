@@ -76,6 +76,10 @@ type ServerDeps = {
   emitter: MessageEmitter;
   log: Logger;
   heartbeats: import("./heartbeat.js").HeartbeatScheduler;
+  /** Called on any clean session-end path (reconnect dedup + /agents/disconnect).
+   *  Used by index.ts to purge session-scoped webhooks immediately rather than
+   *  waiting for the reconciler. */
+  onSessionEnd?: (sessionId: string, agentId: string) => void;
 };
 
 // --- JWT verification ---
@@ -144,7 +148,7 @@ export async function runCleanup(
   await fn(ctx.meta, ctx.secrets, fetch);
 }
 
-export function createServer({ port, store, router, emitter, log, heartbeats }: ServerDeps) {
+export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd }: ServerDeps) {
   _serverLog = log;
   const app = new Hono();
 
@@ -486,6 +490,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       for (const old of oldSessions) {
         store.disconnectSession(old.id);
         emitter.closeAndUnregister(agentId, old.id);
+        onSessionEnd?.(old.id, agentId);
       }
     }
 
@@ -523,6 +528,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
 
     store.disconnectSession(session_id);
     emitter.closeAndUnregister(agentId, session_id);
+    onSessionEnd?.(session_id, agentId);
 
     // Clean shutdown: if this was the agent's last live session, soft-reap.
     //
@@ -819,7 +825,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
     if (err) return err;
 
     const body = await c.req.json();
-    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup } = body;
+    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup, session_id } = body;
 
     if (!plugin) {
       return c.json({ error: "missing plugin" }, 400);
@@ -850,6 +856,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats }: 
       meta: meta ? JSON.stringify(meta) : undefined,
       cleanup: cleanup ?? undefined,
       dedup: dedup ?? undefined,
+      sessionId: typeof session_id === "string" && session_id.length > 0 ? session_id : undefined,
     });
 
     return c.json({

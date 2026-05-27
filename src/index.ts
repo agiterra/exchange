@@ -101,7 +101,32 @@ const ourPeerName = (process.env.WIRE_PEER_NAME ?? "").trim() || require("os").h
 const router = new Router(store, emitter, log, { ourPeerName, identity: serverIdentity });
 const heartbeats = new HeartbeatScheduler(store, router, log);
 
-const server = createServer({ port, store, router, emitter, log, heartbeats });
+/**
+ * Purge webhooks scoped to a specific session_id. Runs cleanup JS (best-effort,
+ * async, non-blocking) then deletes the row. Called on any path that ends a
+ * session — clean disconnect, reconnect dedup, reconciler timeout, orphan reap.
+ * Agent-scoped webhooks (session_id NULL) are untouched here; they fall to the
+ * janitor on heartbeat staleness.
+ */
+function purgeSessionScopedWebhooks(sessionId: string): void {
+  const hooks = store.getWebhooksBySession(sessionId);
+  if (hooks.length === 0) return;
+  for (const wh of hooks) {
+    if (wh.cleanup) {
+      const secrets = wh.secrets_map ? JSON.parse(wh.secrets_map) : {};
+      const meta = wh.meta ? JSON.parse(wh.meta) : {};
+      runCleanup(wh.cleanup, { meta, secrets }).then(() => {
+        log.info({ event: "session_scoped_cleanup_ok", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name }, "session-scoped webhook cleanup ok");
+      }).catch((e) => {
+        log.error({ event: "session_scoped_cleanup_error", agent: wh.agent_id, webhook_id: wh.id, plugin: wh.plugin, name: wh.name, err: e }, "session-scoped webhook cleanup error");
+      });
+    }
+    store.deleteWebhook(wh.id);
+    log.info({ event: "session_scoped_webhook_swept", agent: wh.agent_id, webhook_id: wh.id, session: sessionId, plugin: wh.plugin, name: wh.name }, `session-end: swept webhook ${wh.id}`);
+  }
+}
+
+const server = createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd: purgeSessionScopedWebhooks });
 heartbeats.start();
 
 // Boot-time peer announcement (v1.1.0 federation). If we have a public
@@ -134,6 +159,7 @@ setInterval(() => {
     } else if (t.newStatus === "disconnected") {
       log.info({ event: "session_disconnected", agent: t.agentId, session: t.sessionId }, "session → disconnected");
       emitter.closeAndUnregister(t.agentId, t.sessionId);
+      purgeSessionScopedWebhooks(t.sessionId);
     }
   }
 
@@ -160,6 +186,7 @@ setInterval(() => {
           log.info({ event: "session_reap", reason, agentId: data.agentId, ccPid: data.ccPid, mcpPid: data.pid, sessionId: data.sessionId }, "reaping orphan session");
           store.disconnectSession(data.sessionId);
           emitter.closeAndUnregister(data.agentId, data.sessionId);
+          purgeSessionScopedWebhooks(data.sessionId);
           if (data.pid) {
             try { process.kill(data.pid, "SIGTERM"); } catch {}
           }

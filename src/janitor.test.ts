@@ -27,12 +27,13 @@ function makeAgent(id: string, opts: { permanent?: boolean } = {}): void {
   });
 }
 
-function makeWebhook(agentId: string, name: string, cleanup?: string): number {
+function makeWebhook(agentId: string, name: string, cleanup?: string, sessionId?: string): number {
   return store.createWebhook({
     agentId,
     plugin: "github",
     name,
     cleanup,
+    sessionId,
   });
 }
 
@@ -105,6 +106,22 @@ describe("getStaleWebhooks — janitor query", () => {
     staleSession("perma", 5 * 60_000);
     const stale = store.getStaleWebhooks(60_000);
     expect(stale.map((w) => w.id)).toContain(wid);
+  });
+
+  test("session-scoped: getWebhooksBySession returns only matching session_id", () => {
+    makeAgent("scoped");
+    const sid = freshSession("scoped");
+    const wid = makeWebhook("scoped", "pr-7", undefined, sid);
+    const widAgentScoped = makeWebhook("scoped", "pr-8"); // no sessionId
+
+    const bySession = store.getWebhooksBySession(sid);
+    expect(bySession.map((w) => w.id)).toEqual([wid]);
+
+    // Webhook table round-trips session_id
+    const got = store.getWebhookById(wid);
+    expect(got?.session_id).toBe(sid);
+    const gotAgentScoped = store.getWebhookById(widAgentScoped);
+    expect(gotAgentScoped?.session_id).toBeNull();
   });
 
   test("re-runnable: dependents_purged_at being set does NOT exempt orphans (Madeleine/Tiramisu bug)", () => {

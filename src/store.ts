@@ -245,6 +245,7 @@ export type Webhook = {
   cleanup: string | null;
   dedup: string | null;
   emit: string | null;
+  session_id: string | null;
   created_at: number;
 };
 
@@ -412,6 +413,17 @@ export class Store {
     const whCols3 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
     if (!whCols3.some((c) => c.name === "emit")) {
       this.db.exec("ALTER TABLE webhooks ADD COLUMN emit TEXT");
+    }
+
+    // session_id: optional session-scoping. Null = agent-scoped (legacy
+    // behavior, swept only by janitor on heartbeat staleness). Non-null =
+    // tied to a specific agent_sessions.id; cleanup runs immediately when
+    // that session transitions to disconnected. Lets a transient ephemeral
+    // declare "this webhook is just for THIS conversation," not "for me
+    // forever." Issue agiterra/wire#23, redesign item #3.
+    const whCols4 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    if (!whCols4.some((c) => c.name === "session_id")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN session_id TEXT");
     }
   }
 
@@ -809,17 +821,26 @@ export class Store {
     cleanup?: string;
     dedup?: string;
     emit?: string;
+    sessionId?: string;
   }): number {
     const now = Date.now();
     const result = this.db.prepare(`
-      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, session_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.agentId, opts.plugin, opts.name,
       opts.validator ?? null, opts.secretsMap ?? null,
-      opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, opts.emit ?? null, now,
+      opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, opts.emit ?? null,
+      opts.sessionId ?? null, now,
     );
     return Number(result.lastInsertRowid);
+  }
+
+  /** Webhooks scoped to a specific session (non-null webhooks.session_id). */
+  getWebhooksBySession(sessionId: string): Webhook[] {
+    return this.db.prepare(
+      "SELECT * FROM webhooks WHERE session_id = ?"
+    ).all(sessionId) as Webhook[];
   }
 
   deleteWebhook(id: number): void {
