@@ -863,10 +863,18 @@ export class Store {
   }
 
   /**
-   * Webhooks whose owning agent has no session that heartbeated within
-   * `staleMs`. Both ephemeral and permanent agents are included — when a
-   * permanent agent goes offline its webhooks become orphans too, and it can
-   * re-register them on reconnect.
+   * Ephemeral agents' webhooks whose owner has no session that heartbeated
+   * within `staleMs`. Permanent agents are excluded — their webhook URLs are
+   * advertised to external services (Slack, GitHub, etc.) and must survive
+   * offline periods so the agent can resume on reconnect with the same URL.
+   * Operators manage permanent-agent webhook lifecycle explicitly via
+   * `deleteWebhooksForAgent`.
+   *
+   * Why this matters: the prior policy ("sweep both kinds; permanents re-
+   * register on reconnect") assumed plugins idempotently re-registered on
+   * boot. They don't. The 2026-05-27 sweep silently dropped Herald's Slack
+   * firehose and Brioche's GitHub PR webhook in the same tick after their
+   * heartbeats lapsed >1h.
    *
    * Newly-registered agents that haven't opened a session yet are excluded
    * via `webhooks.created_at < cutoff`, so webhooks registered seconds ago
@@ -881,7 +889,9 @@ export class Store {
     const cutoff = Date.now() - staleMs;
     return this.db.prepare(`
       SELECT w.* FROM webhooks w
-      WHERE w.created_at < ?
+      JOIN agents a ON a.id = w.agent_id
+      WHERE a.permanent = 0
+        AND w.created_at < ?
         AND NOT EXISTS (
           SELECT 1 FROM agent_sessions s
           WHERE s.agent_id = w.agent_id AND s.last_heartbeat > ?

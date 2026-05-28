@@ -99,11 +99,25 @@ describe("getStaleWebhooks — janitor query", () => {
     expect(stale.map((w) => w.id)).not.toContain(wid);
   });
 
-  test("sweeps permanent agents' webhooks too (they re-register on reconnect)", () => {
+  test("preserves permanent agents' webhooks even when sessions are stale", () => {
+    // Permanent agents' webhook URLs are advertised to external services
+    // (Slack, GitHub). Sweeping on heartbeat lapse silently breaks the
+    // integration — operator manages lifecycle explicitly instead.
     makeAgent("perma", { permanent: true });
     const wid = makeWebhook("perma", "pr-5");
     ageWebhook(wid, 2_000_000);
     staleSession("perma", 5 * 60_000);
+    const stale = store.getStaleWebhooks(60_000);
+    expect(stale.map((w) => w.id)).not.toContain(wid);
+  });
+
+  test("still sweeps an ephemeral webhook when its agent has no fresh heartbeat", () => {
+    // Complement to the permanent-preserve test above: the ephemeral path
+    // must keep working so dead ephemerals don't leak webhook rows forever.
+    makeAgent("ephemeral-dead", { permanent: false });
+    const wid = makeWebhook("ephemeral-dead", "pr-ephemeral");
+    ageWebhook(wid, 2_000_000);
+    staleSession("ephemeral-dead", 5 * 60_000);
     const stale = store.getStaleWebhooks(60_000);
     expect(stale.map((w) => w.id)).toContain(wid);
   });
