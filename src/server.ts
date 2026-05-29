@@ -842,6 +842,19 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       }
     }
 
+    // Idempotent registration: if a webhook already exists for this
+    // (agent, plugin, name), return it untouched rather than hitting the
+    // UNIQUE constraint. Lets permanent-agent plugins re-register on boot
+    // to self-heal without churning the URL or overwriting secrets/filter.
+    const existing = store.getWebhookByName(agentId, plugin, name);
+    if (existing) {
+      return c.json({
+        webhook_id: existing.id,
+        url: `/webhooks/${agentId}/${plugin}/${name}`,
+        registered: false,
+      });
+    }
+
     const secretsMap = webhook_secret
       ? JSON.stringify({ webhook_secret })
       : body.secrets ? JSON.stringify(body.secrets) : undefined;
