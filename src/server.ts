@@ -35,7 +35,10 @@ import {
   createSession as createAuthSession,
   generateRegistrationOptions,
   generateAuthenticationOptions,
+  getRpIds,
+  getExpectedOrigins,
 } from "./auth.js";
+import { verifyRegistrationResponse, verifyAuthenticationResponse } from "@simplewebauthn/server";
 import type { Logger } from "pino";
 import { evaluateFilter, evaluateExpression, validateFilter } from "./filter.js";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
@@ -1420,29 +1423,64 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
   app.post("/auth/register/verify", async (c) => {
     const body = await c.req.json();
-    const { id, rawId, response: resp, display_name } = body;
+    const { id, rawId, response: resp, display_name, type } = body;
 
     if (!id || !resp?.attestationObject || !resp?.clientDataJSON) {
       return c.json({ error: "invalid registration response" }, 400);
     }
 
-    // Store the credential — simplified verification for passkey registration.
-    // Full FIDO2 attestation verification requires cbor decoding of the attestation object.
-    // For the local trust model (operator on own machine), we store the credential ID
-    // and extract the public key on first auth.
-    const operatorId = body._operatorId ?? crypto.randomUUID();
-    const role = store.hasOwner() ? "member" : "owner";
+    // First-claim-owns: only the first passkey claims ownership. Once an owner
+    // exists, registration is closed — additional operators arrive via the
+    // request/approve flow (not yet built), never by self-registering.
+    if (store.hasOwner()) {
+      return c.json({ error: "instance already claimed" }, 403);
+    }
+
+    // Full FIDO2 attestation verification: checks the challenge was one we
+    // issued (and consumes it, one-time), the origin/RP ID match, and extracts
+    // the COSE public key we'll verify future assertions against.
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: {
+          id,
+          rawId,
+          response: {
+            clientDataJSON: resp.clientDataJSON,
+            attestationObject: resp.attestationObject,
+            transports: resp.transports,
+          },
+          clientExtensionResults: {},
+          type: type ?? "public-key",
+        },
+        expectedChallenge: (ch) => store.consumeChallenge(ch),
+        expectedOrigin: getExpectedOrigins(),
+        expectedRPID: getRpIds(),
+        requireUserVerification: false,
+      });
+    } catch (e: any) {
+      return c.json({ error: `registration verification failed: ${e.message}` }, 400);
+    }
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return c.json({ error: "registration not verified" }, 400);
+    }
+
+    const { credential } = verification.registrationInfo;
+    const operatorId = crypto.randomUUID();
     const token = crypto.randomUUID();
-
-    store.createOperator(operatorId, display_name ?? "Operator", role, token);
-
-    // Store credential with attestation as public key placeholder
-    const attestationBytes = Buffer.from(rawId, "base64url");
-    store.upsertCredential(id, operatorId, attestationBytes, 0);
+    store.createOperator(operatorId, display_name ?? "Operator", "owner", token);
+    store.upsertCredential(
+      credential.id,
+      operatorId,
+      Buffer.from(credential.publicKey),
+      credential.counter,
+      credential.transports?.join(","),
+    );
 
     const { cookie } = createAuthSession(operatorId, store);
     c.header("Set-Cookie", cookie);
-    return c.json({ registered: true, role });
+    return c.json({ registered: true, role: "owner" });
   });
 
   // --- Auth: Login ---
@@ -1457,22 +1495,58 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
   app.post("/auth/login/verify", async (c) => {
     const body = await c.req.json();
-    const { id } = body;
+    const { id, rawId, response: resp, type } = body;
 
-    if (!id) {
-      return c.json({ error: "missing credential id" }, 400);
+    if (!id || !resp?.clientDataJSON || !resp?.authenticatorData || !resp?.signature) {
+      return c.json({ error: "invalid authentication response" }, 400);
     }
 
-    const credential = store.getCredential(id);
-    if (!credential) {
+    const stored = store.getCredential(id);
+    if (!stored) {
       return c.json({ error: "unknown credential" }, 401);
     }
 
-    // Simplified verification: credential exists and belongs to a registered operator.
-    // Full FIDO2 assertion verification (signature check against stored public key)
-    // requires extracting the COSE public key from the attestation, which we defer.
-    // The trust model is local machine — passkey biometric IS the auth.
-    const { cookie } = createAuthSession(credential.operator_id, store);
+    // Full FIDO2 assertion verification: the signature over
+    // authenticatorData ‖ SHA-256(clientDataJSON) must verify against the stored
+    // public key, the challenge must be one we issued (consumed one-time), and
+    // the origin/RP ID must match. Nothing here trusts the client's say-so.
+    let verification;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response: {
+          id,
+          rawId,
+          response: {
+            clientDataJSON: resp.clientDataJSON,
+            authenticatorData: resp.authenticatorData,
+            signature: resp.signature,
+            userHandle: resp.userHandle,
+          },
+          clientExtensionResults: {},
+          type: type ?? "public-key",
+        },
+        expectedChallenge: (ch) => store.consumeChallenge(ch),
+        expectedOrigin: getExpectedOrigins(),
+        expectedRPID: getRpIds(),
+        credential: {
+          id: stored.credential_id,
+          publicKey: new Uint8Array(stored.public_key),
+          counter: stored.counter,
+        },
+        requireUserVerification: false,
+      });
+    } catch (e: any) {
+      return c.json({ error: `authentication failed: ${e.message}` }, 401);
+    }
+
+    if (!verification.verified) {
+      return c.json({ error: "authentication failed" }, 401);
+    }
+
+    // Persist the rolling signature counter to detect cloned authenticators.
+    store.updateCredentialCounter(stored.credential_id, verification.authenticationInfo.newCounter);
+
+    const { cookie } = createAuthSession(stored.operator_id, store);
     c.header("Set-Cookie", cookie);
     return c.json({ authenticated: true });
   });

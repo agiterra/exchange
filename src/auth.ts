@@ -32,7 +32,38 @@ export function createSession(operatorId: string, store: Store): { sessionId: st
 // --- WebAuthn helpers ---
 
 export function getRpId(): string {
-  return process.env.WIRE_RP_ID ?? "localhost";
+  // Primary RP ID sent to the browser in registration/auth options. A passkey
+  // is bound to exactly one RP ID (domain), so this must match the domain the
+  // dashboard is served from (e.g. the-wire.ngrok.io for the public tunnel).
+  return getRpIds()[0];
+}
+
+/** All RP IDs accepted during verification (comma-separated WIRE_RP_ID). */
+export function getRpIds(): string[] {
+  const raw = process.env.WIRE_RP_ID ?? "localhost";
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Origins accepted during verification. WIRE_ORIGIN (comma-separated) wins;
+ * otherwise derived from the RP IDs — https://<rpid> for real domains, plus
+ * localhost dev origins so local access keeps working.
+ */
+export function getExpectedOrigins(): string[] {
+  if (process.env.WIRE_ORIGIN) {
+    return process.env.WIRE_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const origins = new Set<string>();
+  for (const rpId of getRpIds()) {
+    if (rpId === "localhost") {
+      const port = process.env.WIRE_PORT ?? "9800";
+      origins.add(`http://localhost:${port}`);
+      origins.add("http://localhost");
+    } else {
+      origins.add(`https://${rpId}`);
+    }
+  }
+  return [...origins];
 }
 
 export function getRpName(): string {

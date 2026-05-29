@@ -50,6 +50,68 @@ function register(body: Record<string, unknown>) {
   });
 }
 
+describe("WebAuthn auth — assertion is actually verified (no credential-id bypass)", () => {
+  function loginVerify(body: Record<string, unknown>) {
+    return fetch(`${baseUrl}/auth/login/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("login with a malformed (incomplete) assertion is rejected 400", async () => {
+    const res = await loginVerify({ id: "anything", response: { clientDataJSON: "x" } });
+    expect(res.status).toBe(400);
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  test("login with an unknown credential id is rejected 401", async () => {
+    const res = await loginVerify({
+      id: "no-such-cred",
+      rawId: "no-such-cred",
+      response: { clientDataJSON: "e30", authenticatorData: "AA", signature: "AA" },
+      type: "public-key",
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  test("CRITICAL: a credential that EXISTS but presents a bogus assertion gets NO session", async () => {
+    // This is the exact bypass that existed before: the old handler issued a
+    // session whenever getCredential(id) returned a row, with no signature
+    // check. Insert a real credential row, then present garbage — must fail.
+    store.createOperator("op-1", "Owner", "owner", "tok-1");
+    store.upsertCredential("cred-1", "op-1", Buffer.from([1, 2, 3, 4]), 0);
+
+    const res = await loginVerify({
+      id: "cred-1",
+      rawId: "cred-1",
+      response: {
+        clientDataJSON: Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: "fake", origin: "https://evil.example" })).toString("base64url"),
+        authenticatorData: Buffer.from([0, 0, 0]).toString("base64url"),
+        signature: Buffer.from([9, 9, 9]).toString("base64url"),
+      },
+      type: "public-key",
+    });
+
+    expect([400, 401]).toContain(res.status); // rejected, not authenticated
+    expect(res.headers.get("set-cookie")).toBeNull();
+    const json = await res.json() as { authenticated?: boolean };
+    expect(json.authenticated).toBeUndefined();
+  });
+
+  test("registration is closed once an owner exists (403)", async () => {
+    store.createOperator("op-owner", "Owner", "owner", "tok-owner");
+    store.upsertCredential("owner-cred", "op-owner", Buffer.from([1]), 0);
+    const res = await fetch(`${baseUrl}/auth/register/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "x", rawId: "x", response: { attestationObject: "AA", clientDataJSON: "e30" }, type: "public-key" }),
+    });
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("POST /agents/:id/webhooks — idempotent registration", () => {
   test("first registration creates the webhook (registered:true)", async () => {
     const res = await register({ plugin: "slack", name: "mivid-studios", secrets: { signing_secret: "s1" } });
