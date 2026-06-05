@@ -31,6 +31,18 @@ export type DeliveryResult = {
 
 export type RouteListener = (msg: Message, deliveries: DeliveryResult[]) => void;
 
+/** Input envelope for route()/routeAsync(). */
+export type RouteInput = {
+  source: string;
+  source_id?: string;
+  source_cc_session?: string;
+  dest?: string;
+  dest_cc_session?: string;
+  topic: string;
+  payload: string;
+  raw?: string;
+};
+
 export class Router {
   private routeListeners = new Set<RouteListener>();
   private log: Logger;
@@ -73,27 +85,47 @@ export class Router {
    * dest_cc_session targets a specific Claude Code session (conversation context).
    * Without it, all connected sessions for the agent receive the message.
    */
-  route(msg: {
-    source: string;
-    source_id?: string;
-    source_cc_session?: string;
-    dest?: string;
-    dest_cc_session?: string;
-    topic: string;
-    payload: string;
-    raw?: string;
-  }): { message: Message; deliveries: DeliveryResult[] } {
-    // 1. Write-through: store first, get seq
+  route(msg: RouteInput): { message: Message; deliveries: DeliveryResult[] } {
+    // Write-through: store first (assigns seq), then fan out synchronously.
     const stored = this.store.writeMessage(msg);
+    const deliveries = this.deliver(stored, msg);
+    return { message: stored, deliveries };
+  }
 
-    // 2. Determine recipients. Broadcasts go to every identity — agents AND
-    //    integrations — since integrations subscribe to topics just like
-    //    agents do (e.g. wallet-vault subscribes to wallet.sign.response).
+  /**
+   * Persist synchronously, then fan out asynchronously. For webhook-ingress
+   * paths (ack_early) that must ACK an external sender immediately so its
+   * retry clock (e.g. Slack's ~3s http_timeout) isn't coupled to fan-out
+   * latency. The store write (seq + source_id) completes BEFORE this returns,
+   * so source_id-based dedup is race-safe against a retry that lands while the
+   * fan-out is still pending. Delivery errors are logged, never surfaced to
+   * the already-ACKed caller.
+   */
+  routeAsync(msg: RouteInput): { message: Message } {
+    const stored = this.store.writeMessage(msg);
+    queueMicrotask(() => {
+      try {
+        this.deliver(stored, msg);
+      } catch (e) {
+        this.log.error({ event: "async_deliver_error", seq: stored.seq, err: e }, "deferred webhook delivery failed");
+      }
+    });
+    return { message: stored };
+  }
+
+  /**
+   * Fan a stored message out to its recipients (unicast dest or broadcast)
+   * and notify route listeners. Shared by route() (sync) and routeAsync().
+   */
+  private deliver(stored: Message, msg: RouteInput): DeliveryResult[] {
+    // Determine recipients. Broadcasts go to every identity — agents AND
+    // integrations — since integrations subscribe to topics just like
+    // agents do (e.g. wallet-vault subscribes to wallet.sign.response).
     const recipients = msg.dest
       ? [msg.dest]
       : this.store.getAllAgents("all").map((a) => a.id);
 
-    // 3. Attempt delivery to each recipient
+    // Attempt delivery to each recipient
     const deliveries: DeliveryResult[] = [];
     for (const agentId of recipients) {
       const data = JSON.stringify({
@@ -145,7 +177,7 @@ export class Router {
       }
     }
 
-    return { message: stored, deliveries };
+    return deliveries;
   }
 
   /**
@@ -155,7 +187,7 @@ export class Router {
   private async dispatchFederationForward(
     stored: Message,
     agentId: string,
-    original: { source: string; source_id?: string; source_cc_session?: string; dest?: string; dest_cc_session?: string; topic: string; payload: string; raw?: string },
+    original: RouteInput,
   ): Promise<void> {
     const fed = this.federation!;
     const peer = await findPeerForAgent(this.store, agentId, this.log, this.discoveryCache);

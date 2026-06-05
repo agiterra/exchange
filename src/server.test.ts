@@ -151,3 +151,61 @@ describe("POST /agents/:id/webhooks — idempotent registration", () => {
     expect(store.getWebhooksForAgent("fondant", "slack").length).toBe(2);
   });
 });
+
+describe("inbound webhook — ack_early (immediate-ACK + race-safe dedup)", () => {
+  // A trivial always-pass validator returning {source, topic} exercises the
+  // post-validator flow (responder → filter → dedup → route) without forging
+  // Slack's HMAC or a JWT. Mirrors how slack-tools registers (validator +
+  // dedup="payload.event_id" + ack_early), minus the real signature check.
+  const passValidator = `return { source: "testws", topic: "webhook.slack" };`;
+
+  function postEvent(name: string, eventId: string) {
+    return fetch(`${baseUrl}/webhooks/fondant/slack/${name}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event_id: eventId, type: "event_callback", event: { type: "message" } }),
+    });
+  }
+
+  test("ACKs 200 {queued} and persists the message synchronously BEFORE the ACK", async () => {
+    await register({ plugin: "slack", name: "early", validator: passValidator, dedup: "payload.event_id", ack_early: true });
+
+    const res = await postEvent("early", "EV1");
+    expect(res.status).toBe(200);
+    const json = await res.json() as { seq: number; queued?: boolean; delivered_to?: unknown };
+    expect(json.queued).toBe(true);
+    expect(typeof json.seq).toBe("number");
+    expect(json.delivered_to).toBeUndefined();
+
+    // Race-safety: the row (with source_id) is committed before the ACK
+    // returns, so a retry landing mid-fan-out is still caught by dedup.
+    expect(store.getMessageBySourceId("EV1")).not.toBeNull();
+  });
+
+  test("a retry of the same event_id is dropped at the broker (duplicate), never re-fanned", async () => {
+    await register({ plugin: "slack", name: "early", validator: passValidator, dedup: "payload.event_id", ack_early: true });
+
+    const first = await postEvent("early", "EV2");
+    expect((await first.json() as { queued?: boolean }).queued).toBe(true);
+
+    const retry = await postEvent("early", "EV2");
+    expect(retry.status).toBe(200);
+    const json = await retry.json() as { duplicate?: boolean; delivered?: boolean };
+    expect(json.duplicate).toBe(true);
+    expect(json.delivered).toBe(false);
+
+    // Exactly one row was ever stored for this event_id.
+    const rows = store.getMessages(0, 1000).filter((m) => m.source_id === "EV2");
+    expect(rows.length).toBe(1);
+  });
+
+  test("without ack_early, delivery stays synchronous (caller still gets delivered_to)", async () => {
+    await register({ plugin: "slack", name: "sync", validator: passValidator, dedup: "payload.event_id" });
+
+    const res = await postEvent("sync", "EV3");
+    expect(res.status).toBe(200);
+    const json = await res.json() as { seq: number; queued?: boolean; delivered_to?: unknown[] };
+    expect(json.queued).toBeUndefined();
+    expect(Array.isArray(json.delivered_to)).toBe(true);
+  });
+});
