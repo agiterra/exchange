@@ -247,6 +247,7 @@ export type Webhook = {
   emit: string | null;
   session_id: string | null;
   responder: string | null;
+  ack_early: number;
   created_at: number;
 };
 
@@ -438,6 +439,22 @@ export class Store {
     const whCols5 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
     if (!whCols5.some((c) => c.name === "responder")) {
       this.db.exec("ALTER TABLE webhooks ADD COLUMN responder TEXT");
+    }
+
+    // ack_early: when 1, wire ACKs the inbound webhook with 200 immediately
+    // after auth + responder + filter + dedup-check, then fans out to
+    // subscribers asynchronously. Decouples an external sender's retry clock
+    // (e.g. Slack's ~3s http_timeout → up to 3 retries) from synchronous
+    // route() fan-out latency, which under intermittent load (WAL checkpoint /
+    // event-loop contention) can cross the sender's timeout and trigger a
+    // self-reinforcing retry storm. The message row is still persisted
+    // synchronously BEFORE the ACK (routeAsync), so source_id dedup stays
+    // race-safe against a retry that arrives mid-fan-out. 0 = legacy
+    // synchronous behavior (caller gets {seq, delivered_to}). See
+    // agiterra/wire#26.
+    const whCols6 = this.db.prepare("PRAGMA table_info(webhooks)").all() as { name: string }[];
+    if (!whCols6.some((c) => c.name === "ack_early")) {
+      this.db.exec("ALTER TABLE webhooks ADD COLUMN ack_early INTEGER NOT NULL DEFAULT 0");
     }
   }
 
@@ -837,16 +854,17 @@ export class Store {
     emit?: string;
     sessionId?: string;
     responder?: string;
+    ackEarly?: boolean;
   }): number {
     const now = Date.now();
     const result = this.db.prepare(`
-      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, session_id, responder, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO webhooks (agent_id, plugin, name, validator, secrets_map, filter, meta, cleanup, dedup, emit, session_id, responder, ack_early, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.agentId, opts.plugin, opts.name,
       opts.validator ?? null, opts.secretsMap ?? null,
       opts.filter ?? null, opts.meta ?? null, opts.cleanup ?? null, opts.dedup ?? null, opts.emit ?? null,
-      opts.sessionId ?? null, opts.responder ?? null, now,
+      opts.sessionId ?? null, opts.responder ?? null, opts.ackEarly ? 1 : 0, now,
     );
     return Number(result.lastInsertRowid);
   }

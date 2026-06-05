@@ -828,7 +828,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     if (err) return err;
 
     const body = await c.req.json();
-    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup, session_id, responder } = body;
+    const { plugin, name, validator, webhook_secret, filter: filterExpr, meta, cleanup, dedup, session_id, responder, ack_early } = body;
 
     if (!plugin) {
       return c.json({ error: "missing plugin" }, 400);
@@ -874,6 +874,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       dedup: dedup ?? undefined,
       sessionId: typeof session_id === "string" && session_id.length > 0 ? session_id : undefined,
       responder: typeof responder === "string" && responder.length > 0 ? responder : undefined,
+      ackEarly: ack_early === true || ack_early === 1,
     });
 
     return c.json({
@@ -1021,15 +1022,30 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     };
 
     const dedupKey = (c as any).get("dedupKey") as string | undefined;
-    const { message, deliveries } = router.route({
+    const routeInput = {
       source,
       source_id: dedupKey,
       dest: agentId,
       topic,
       payload: JSON.stringify(envelope),
       raw: rawBody,
-    });
+    };
 
+    // ack_early: ACK the sender the instant the message is persisted
+    // (writeMessage commits seq + source_id synchronously inside routeAsync,
+    // so a retry that lands mid-fan-out is still caught by the dedup check
+    // above), then fan out to subscribers asynchronously. Severs an external
+    // sender's retry clock (e.g. Slack's ~3s http_timeout, which otherwise
+    // re-delivers up to 3× under transient fan-out latency and floods
+    // subscribers with duplicates) from downstream delivery cost. Opt-in per
+    // webhook; without it, delivery stays synchronous and the caller receives
+    // the per-recipient delivery result.
+    if (webhook?.ack_early) {
+      const { message } = router.routeAsync(routeInput);
+      return c.json({ seq: message.seq, queued: true });
+    }
+
+    const { message, deliveries } = router.route(routeInput);
     return c.json({
       seq: message.seq,
       delivered_to: deliveries,
