@@ -672,8 +672,14 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
               keepaliveCount++;
               log.debug({ event: "sse_keepalive", agentId, sessionId, count: keepaliveCount }, "SSE keepalive sent");
             } catch (e) {
+              // Controller already closed (client gone before the abort
+              // handler fired). Stop the timer AND drop the dead writer from
+              // the emitter — matching write()'s cleanup — so live emits stop
+              // hitting it. Leaving it registered wastes an enqueue-throw per
+              // message during reconnect storms. Never rethrows.
               log.warn({ event: "sse_keepalive_fail", agentId, sessionId, err: String(e) }, "SSE keepalive failed");
               clearInterval(keepalive);
+              emitter.unregister(agentId, sessionId!);
             }
           }, 30_000);
 
