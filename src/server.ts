@@ -686,7 +686,13 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
           const session = store.getSession(sessionId!);
           const replaySeq = session?.last_ack_seq ?? 0;
           log.info({ event: "sse_replay", agentId, sessionId, fromSeq: replaySeq }, "SSE replaying backlog");
-          router.replay(agentId, sessionId!);
+          // Fire-and-forget: replay is chunked/async so it doesn't block the
+          // stream handler (or the event loop). Live emits to this session
+          // buffer until the backlog drains. beginReplay runs synchronously
+          // here, before the first live message can arrive.
+          router.replay(agentId, sessionId!).catch((e) => {
+            log.error({ event: "sse_replay_error", agentId, sessionId, err: String(e) }, "SSE backlog replay failed");
+          });
 
           c.req.raw.signal.addEventListener("abort", () => {
             log.info({ event: "sse_abort", agentId, sessionId }, "SSE client disconnected");

@@ -216,26 +216,48 @@ export class Router {
   }
 
   /**
-   * Replay backlog for a session. Sends all messages addressed to this agent
-   * (unicast or broadcast) since their last ack.
+   * Replay backlog for a session, then resume live delivery. Runs async and
+   * CHUNKED: emits the backlog in batches, yielding to the event loop between
+   * them, so a large backlog (or many simultaneous reconnects) can't starve it —
+   * the synchronous-replay burst was the load that turned an SSE flap into a
+   * gateway hang.
+   *
+   * Live messages that arrive mid-replay are buffered by the emitter
+   * (beginReplay/endReplay) and flushed, in seq order, once the backlog drains —
+   * so the client never sees a higher-seq live message ahead of un-replayed
+   * backlog (which, with MAX(last_ack_seq) + per-event acks, would strand the
+   * skipped backlog on a mid-replay disconnect). Targets the specific session,
+   * not every session of the agent.
    */
-  replay(agentId: string, sessionId: string): void {
+  async replay(agentId: string, sessionId: string): Promise<void> {
     const session = this.store.getSession(sessionId);
     if (!session) return;
 
-    const messages = this.store.getMessagesForAgent(agentId, session.last_ack_seq, 1000);
-
-    for (const msg of messages) {
-      const data = JSON.stringify({
-        seq: msg.seq,
-        source: msg.source,
-        topic: msg.topic,
-        payload: JSON.parse(msg.payload),
-        dest: msg.dest,
-        created_at: msg.created_at,
-      });
-
-      this.emitter.emit(agentId, data, msg.seq);
+    this.emitter.beginReplay(agentId, sessionId);
+    try {
+      const messages = this.store.getMessagesForAgent(agentId, session.last_ack_seq, 1000);
+      const CHUNK = 50;
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        const data = JSON.stringify({
+          seq: msg.seq,
+          source: msg.source,
+          topic: msg.topic,
+          payload: JSON.parse(msg.payload),
+          dest: msg.dest,
+          created_at: msg.created_at,
+        });
+        if (!this.emitter.replayWrite(agentId, sessionId, data, msg.seq)) {
+          return; // session gone mid-replay — endReplay() (finally) no-ops
+        }
+        if ((i + 1) % CHUNK === 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+      }
+    } finally {
+      // Always flush buffered live frames and resume direct delivery, even if a
+      // write failed or the backlog was empty.
+      this.emitter.endReplay(agentId, sessionId);
     }
   }
 }
