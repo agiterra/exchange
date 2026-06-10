@@ -209,3 +209,60 @@ describe("inbound webhook — ack_early (immediate-ACK + race-safe dedup)", () =
     expect(Array.isArray(json.delivered_to)).toBe(true);
   });
 });
+
+describe("plugin_settings mutation events — scoped to the namespace owner, not broadcast", () => {
+  function rawDb() {
+    return (store as unknown as {
+      db: { prepare: (q: string) => { get: (...a: unknown[]) => unknown } };
+    }).db;
+  }
+
+  function putSetting(namespace: string, key: string, value: unknown) {
+    return fetch(`${baseUrl}/plugin_settings/${namespace}/${encodeURIComponent(key)}?token=${TOKEN}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+  }
+
+  test("PUT routes the updated event dest=namespace; bystanders get no delivery", async () => {
+    store.upsertAgent({ id: "vaultns", display_name: "vaultns", pubkey: "pk-v" });
+    // beforeEach registered "fondant" — the bystander a broadcast would have reached.
+
+    const res = await putSetting("vaultns", "wallet:0xabc", { name: "w" });
+    expect(res.status).toBe(200);
+
+    const msg = store.getMessages(0, 1000).filter((m) => m.topic === "plugin_settings.updated").pop();
+    expect(msg?.dest).toBe("vaultns");
+
+    const bystander = rawDb().prepare(
+      "SELECT count(*) AS n FROM delivery_log dl JOIN messages m ON m.seq = dl.message_seq WHERE m.topic = 'plugin_settings.updated' AND dl.agent_id = 'fondant'",
+    ).get() as { n: number };
+    expect(bystander.n).toBe(0);
+  });
+
+  test("DELETE routes the deleted event dest=namespace", async () => {
+    store.upsertAgent({ id: "vaultns", display_name: "vaultns", pubkey: "pk-v" });
+    await putSetting("vaultns", "k", 1);
+
+    const res = await fetch(`${baseUrl}/plugin_settings/vaultns/k?token=${TOKEN}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+
+    const msg = store.getMessages(0, 1000).filter((m) => m.topic === "plugin_settings.deleted").pop();
+    expect(msg?.dest).toBe("vaultns");
+  });
+
+  test("ownerless namespace (operator-only) routes without error and floods nobody", async () => {
+    // No agent registered with this id — delivery is a logged no-op, never a throw.
+    const res = await putSetting("fv-throwaway", "k", { x: 1 });
+    expect(res.status).toBe(200);
+
+    const msg = store.getMessages(0, 1000).filter((m) => m.topic === "plugin_settings.updated").pop();
+    expect(msg?.dest).toBe("fv-throwaway");
+
+    const anyDelivery = rawDb().prepare(
+      "SELECT count(*) AS n FROM delivery_log dl JOIN messages m ON m.seq = dl.message_seq WHERE m.topic = 'plugin_settings.updated' AND dl.result = 'ok'",
+    ).get() as { n: number };
+    expect(anyDelivery.n).toBe(0);
+  });
+});

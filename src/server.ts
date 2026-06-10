@@ -1245,11 +1245,18 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
     store.setPluginSetting(namespace, key, value, writer);
 
-    // Notify subscribers. Broadcast (no dest) so any agent or integration
-    // that subscribes to "plugin_settings.updated" gets the live mutation.
+    // Notify the namespace owner — scoped (dest=namespace), not broadcast.
+    // The write-auth model above already makes a namespace the property of
+    // the identity whose id matches it, and that identity is the consumer
+    // that needs live mutations (e.g. an integration watching its own
+    // directory). A broadcast fanned every namespace's churn into every
+    // agent's context. Server-side consumers (dashboard) still see all
+    // mutations via route listeners, which fire regardless of dest; anyone
+    // else can poll the public GET.
     router.route({
       source: "wire",
       topic: "plugin_settings.updated",
+      dest: namespace,
       payload: JSON.stringify({ namespace, key, value, updated_by: writer, updated_at: Date.now() }),
     });
 
@@ -1277,9 +1284,11 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
     const removed = store.deletePluginSetting(namespace, key);
     if (removed) {
+      // Scoped to the namespace owner — same rationale as the PUT event.
       router.route({
         source: "wire",
         topic: "plugin_settings.deleted",
+        dest: namespace,
         payload: JSON.stringify({ namespace, key, deleted_by: writer, deleted_at: Date.now() }),
       });
     }
