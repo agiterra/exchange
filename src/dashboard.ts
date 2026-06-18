@@ -353,7 +353,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 </head>
 <body>
   <header>
-    <h1>The Wire <span>v0.3.0</span></h1>
+    <h1>${process.env.WIRE_INSTANCE_NAME ? process.env.WIRE_INSTANCE_NAME + " - " : ""}The Wire <span>v0.3.0</span></h1>
     <div class="operator">${esc(operatorName)} · <a href="/auth/logout">logout</a></div>
   </header>
 
@@ -985,7 +985,7 @@ export function renderLogin(hasOwner: boolean): string {
 </head>
 <body>
   <div class="card">
-    <h1>The Wire</h1>
+    <h1>${process.env.WIRE_INSTANCE_NAME ? process.env.WIRE_INSTANCE_NAME + " - " : ""}The Wire</h1>
     <p>${subtitle}</p>
     <div id="name-field">
       <input type="text" id="display-name" placeholder="Your name" autocomplete="name">
