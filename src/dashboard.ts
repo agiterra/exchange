@@ -33,7 +33,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>The Wire</title>
+  <title>${process.env.WIRE_INSTANCE_NAME ?? "The Wire"}</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M18 4L10 18h5l-2 10 10-14h-5z' fill='%23fbbf24'/></svg>">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
@@ -930,7 +930,7 @@ export function renderLogin(hasOwner: boolean): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>The Wire — Login</title>
+  <title>${process.env.WIRE_INSTANCE_NAME ?? "The Wire"} — Login</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0a0a'/><path d='M18 4L10 18h5l-2 10 10-14h-5z' fill='%23fbbf24'/></svg>">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }

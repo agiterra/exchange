@@ -67,7 +67,7 @@ export function getExpectedOrigins(): string[] {
 }
 
 export function getRpName(): string {
-  return "The Wire";
+  return process.env.WIRE_INSTANCE_NAME ?? "The Wire";
 }
 
 export function generateRegistrationOptions(store: Store, operatorId: string, displayName: string) {
