@@ -96,7 +96,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     col.col-key { width: 100px; }
     col.col-sessions { width: 70px; }
     col.col-seen { }
-    col.col-actions { width: 100px; }
+    col.col-actions { width: 220px; }
     .badge-cell { white-space: nowrap; }
     td, th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     th { color: #525252; font-weight: 400; font-size: 11px; text-align: left; }
