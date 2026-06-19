@@ -396,7 +396,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
   app.post("/agents/register", async (c) => {
     const body = await c.req.json();
-    const { id, display_name, pubkey, permanent, pronouns, force_rotate, kind } = body;
+    const { id, display_name, pubkey, permanent, pronouns, force_rotate, kind, ssh_host, run_as_uid, screen_name } = body;
 
     if (!id || !display_name || !pubkey) {
       return c.json({ error: "missing required fields: id, display_name, pubkey" }, 400);
@@ -473,7 +473,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       pubkeyMatch: existing ? existing.pubkey === pubkey : null,
     }, `REGISTER ${id} via ${authPath}`);
 
-    store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent, pronouns, kind });
+    store.upsertAgent({ id, display_name, pubkey, permanent: !!permanent, pronouns, kind, ssh_host, run_as_uid, screen_name });
 
     return c.json({ agent_id: id, registered: true }, 201);
   });

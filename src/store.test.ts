@@ -32,6 +32,50 @@ function postMessage(source: string, dest: string | null, topic = "ipc", payload
   return msg.seq;
 }
 
+describe("click-to-attach self-report columns (ssh_host / run_as_uid / screen_name)", () => {
+  test("round-trip via upsertAgent on a fresh insert", () => {
+    store.upsertAgent({
+      id: "screeny",
+      display_name: "screeny",
+      pubkey: "pk-screeny",
+      permanent: true,
+      ssh_host: "mini.local",
+      run_as_uid: "agent-7",
+      screen_name: "screeny-main",
+    });
+    const a = store.getAgent("screeny")!;
+    expect(a.ssh_host).toBe("mini.local");
+    expect(a.run_as_uid).toBe("agent-7");
+    expect(a.screen_name).toBe("screeny-main");
+  });
+
+  test("omitting fields on insert leaves them NULL", () => {
+    registerAgent("bare");
+    const a = store.getAgent("bare")!;
+    expect(a.ssh_host).toBeNull();
+    expect(a.run_as_uid).toBeNull();
+    expect(a.screen_name).toBeNull();
+  });
+
+  test("re-registering WITHOUT the fields does NOT clobber existing values (sticky)", () => {
+    store.upsertAgent({
+      id: "sticky",
+      display_name: "sticky",
+      pubkey: "pk-sticky",
+      permanent: true,
+      ssh_host: "host-a",
+      run_as_uid: "uid-a",
+      screen_name: "screen-a",
+    });
+    // Re-register the same agent omitting the self-report fields entirely.
+    store.upsertAgent({ id: "sticky", display_name: "sticky", pubkey: "pk-sticky", permanent: true });
+    const a = store.getAgent("sticky")!;
+    expect(a.ssh_host).toBe("host-a");
+    expect(a.run_as_uid).toBe("uid-a");
+    expect(a.screen_name).toBe("screen-a");
+  });
+});
+
 describe("SSE replay-on-connect — purged-sessions path", () => {
   test("new agent registered after backlog exists is NOT dumped historical broadcasts", () => {
     // System has prior chatter — broadcasts that pre-date the agent's existence.

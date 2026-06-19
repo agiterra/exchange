@@ -23,6 +23,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         <td class="agent-actions">
           <button data-peek="${esc(a.id)}" title="Read agent's screen output">peek</button>
           <button data-msg="${esc(a.id)}" title="Send IPC message to agent">msg</button>
+          <a class="row-btn" href="${esc(attachHref(a))}" title="Attach this agent's screen in a new iTerm2 tab">📺 attach</a>
         </td>
       </tr>
       <tr><td colspan="7" class="agent-plan" data-plan-for="${esc(a.id)}">${a.plan ? esc(a.plan) : ""}</td></tr>`;
@@ -119,6 +120,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .agent-actions { white-space: nowrap; }
     .agent-actions button { padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; }
     .agent-actions button:hover { background: #2a2a3e; color: #e5e5e5; border-color: #555; }
+    .agent-actions .row-btn { display: inline-block; padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; text-decoration: none; line-height: inherit; }
+    .agent-actions .row-btn:hover { background: #2a2a3e; color: #e5e5e5; border-color: #555; }
     .peek-output { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-top: 4px; white-space: pre-wrap; font-size: 11px; color: #a1a1aa; max-height: 400px; overflow-y: auto; }
     .peek-output .peek-header { color: #fbbf24; margin-bottom: 8px; font-weight: bold; }
     .agent-plan table { border-collapse: collapse; margin: 4px 0; width: auto; }
@@ -459,6 +462,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
           '<td class="agent-actions">' +
             '<button data-peek="' + esc(a.id) + '" title="Read agent screen output">peek</button>' +
             '<button data-msg="' + esc(a.id) + '" title="Send IPC message to agent">msg</button>' +
+            '<a class="row-btn" href="' + esc(attachHref(a)) + '" title="Attach this agent\\'s screen in a new iTerm2 tab">📺 attach</a>' +
           '</td>' +
           '</tr>' +
           '<tr><td colspan="7" class="agent-plan" data-plan-for="' + esc(a.id) + '">' + renderPlan(a.plan || '') + '</td></tr>';
@@ -578,6 +582,16 @@ export function renderDashboard(agents: any[], operatorName: string): string {
 
     function esc(s) {
       return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : '';
+    }
+
+    // Mirror of the server-side attachHref() — see dashboard.ts. Keep in sync.
+    function attachHref(a) {
+      return 'wire-attach://attach?' + new URLSearchParams({
+        agent: a.id,
+        host: a.ssh_host || 'local',
+        user: a.run_as_uid || '',
+        screen: a.screen_name || a.id,
+      }).toString();
     }
 
     function renderPlan(src) {
@@ -1108,4 +1122,24 @@ export function renderLogin(hasOwner: boolean): string {
 
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Build the wire-attach:// URL for an agent's click-to-attach button (Phase 2/3).
+ * The native WireAttach.app registers the wire-attach:// scheme and opens the
+ * agent's screen in a new iTerm2 tab. Falls back to 'local' host and the agent
+ * id as screen name when the agent didn't self-report those columns.
+ *
+ * NOTE: an identical helper is inlined in the client SSE re-render <script>
+ * below — the two render sites run in different contexts (server-side template
+ * literal vs. browser string-concat) so the helper is duplicated, not imported.
+ * Keep the two in sync.
+ */
+function attachHref(a: any): string {
+  return "wire-attach://attach?" + new URLSearchParams({
+    agent: a.id,
+    host: a.ssh_host || "local",
+    user: a.run_as_uid || "",
+    screen: a.screen_name || a.id,
+  }).toString();
 }

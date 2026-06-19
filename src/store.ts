@@ -215,6 +215,18 @@ export type Agent = {
    * the default agent list.
    */
   kind: AgentKind;
+  /**
+   * Click-to-attach self-report fields (Phase 2). Populated by the agent at
+   * registration so the dashboard can emit a wire-attach:// URL that the
+   * native WireAttach.app opens in a new iTerm2 tab. All three are optional
+   * and NULL for agents that don't self-report (e.g. integrations, or older
+   * clients): ssh_host is the host the agent's screen runs on ('local' when
+   * omitted), run_as_uid is the unix user it runs as, screen_name is the
+   * GNU screen / tmux session name (falls back to the agent id).
+   */
+  ssh_host: string | null;
+  run_as_uid: string | null;
+  screen_name: string | null;
 };
 
 export type SessionStatus = "connected" | "stale" | "disconnected";
@@ -456,6 +468,21 @@ export class Store {
     if (!whCols6.some((c) => c.name === "ack_early")) {
       this.db.exec("ALTER TABLE webhooks ADD COLUMN ack_early INTEGER NOT NULL DEFAULT 0");
     }
+
+    // Click-to-attach self-report columns (Phase 2). Agents optionally report
+    // where their screen lives so the dashboard can emit a wire-attach:// URL
+    // for the native WireAttach.app. All NULLable; absence means "not self-
+    // reported" and the dashboard falls back ('local' host, agent-id screen).
+    const agentCols7 = this.db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+    if (!agentCols7.some((c) => c.name === "ssh_host")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN ssh_host TEXT");
+    }
+    if (!agentCols7.some((c) => c.name === "run_as_uid")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN run_as_uid TEXT");
+    }
+    if (!agentCols7.some((c) => c.name === "screen_name")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN screen_name TEXT");
+    }
   }
 
   // --- Messages ---
@@ -640,17 +667,27 @@ export class Store {
     permanent?: boolean;
     pronouns?: string;
     kind?: AgentKind;
+    ssh_host?: string;
+    run_as_uid?: string;
+    screen_name?: string;
   }): void {
     const now = Date.now();
     this.db.prepare(`
-      INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, kind, created_at, last_seen_at, reaped_at, last_seen_seq)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, COALESCE((SELECT MAX(seq) FROM messages), 0))
+      INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, kind, ssh_host, run_as_uid, screen_name, created_at, last_seen_at, reaped_at, last_seen_seq)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, COALESCE((SELECT MAX(seq) FROM messages), 0))
       ON CONFLICT(id) DO UPDATE SET
         display_name = excluded.display_name,
         pubkey = excluded.pubkey,
         permanent = CASE WHEN excluded.permanent = 1 THEN 1 ELSE agents.permanent END,
         pronouns = COALESCE(excluded.pronouns, agents.pronouns),
         kind = excluded.kind,
+        -- Self-report fields are sticky: a caller that omits them (e.g. an
+        -- older client re-registering, or a plugin that doesn't populate
+        -- them) must NOT clobber previously-reported values to NULL — same
+        -- semantics as pronouns above.
+        ssh_host = COALESCE(excluded.ssh_host, agents.ssh_host),
+        run_as_uid = COALESCE(excluded.run_as_uid, agents.run_as_uid),
+        screen_name = COALESCE(excluded.screen_name, agents.screen_name),
         last_seen_at = excluded.last_seen_at,
         created_at = excluded.created_at,
         reaped_at = NULL
@@ -661,6 +698,9 @@ export class Store {
       agent.permanent ? 1 : 0,
       agent.pronouns ?? null,
       agent.kind ?? "agent",
+      agent.ssh_host ?? null,
+      agent.run_as_uid ?? null,
+      agent.screen_name ?? null,
       now,
       now,
     );

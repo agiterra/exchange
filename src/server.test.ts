@@ -112,6 +112,59 @@ describe("WebAuthn auth — assertion is actually verified (no credential-id byp
   });
 });
 
+describe("POST /agents/register — click-to-attach self-report fields", () => {
+  function registerAgent(body: Record<string, unknown>) {
+    return fetch(`${baseUrl}/agents/register?token=${TOKEN}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("threads ssh_host / run_as_uid / screen_name through to the store", async () => {
+    const res = await registerAgent({
+      id: "atty",
+      display_name: "atty",
+      pubkey: "pk-atty",
+      ssh_host: "mini.local",
+      run_as_uid: "agent-9",
+      screen_name: "atty-screen",
+    });
+    expect(res.status).toBe(201);
+    const a = store.getAgent("atty")!;
+    expect(a.ssh_host).toBe("mini.local");
+    expect(a.run_as_uid).toBe("agent-9");
+    expect(a.screen_name).toBe("atty-screen");
+  });
+
+  test("omitting the fields still registers (backward-compat) and leaves them NULL", async () => {
+    const res = await registerAgent({ id: "plain", display_name: "plain", pubkey: "pk-plain" });
+    expect(res.status).toBe(201);
+    const a = store.getAgent("plain")!;
+    expect(a.ssh_host).toBeNull();
+    expect(a.run_as_uid).toBeNull();
+    expect(a.screen_name).toBeNull();
+  });
+
+  test("re-register without the fields does NOT null out previously-reported values", async () => {
+    await registerAgent({
+      id: "keep",
+      display_name: "keep",
+      pubkey: "pk-keep",
+      ssh_host: "host-x",
+      run_as_uid: "uid-x",
+      screen_name: "screen-x",
+    });
+    // Sponsor re-registers omitting the self-report fields.
+    const res = await registerAgent({ id: "keep", display_name: "keep", pubkey: "pk-keep" });
+    expect(res.status).toBe(201);
+    const a = store.getAgent("keep")!;
+    expect(a.ssh_host).toBe("host-x");
+    expect(a.run_as_uid).toBe("uid-x");
+    expect(a.screen_name).toBe("screen-x");
+  });
+});
+
 describe("POST /agents/:id/webhooks — idempotent registration", () => {
   test("first registration creates the webhook (registered:true)", async () => {
     const res = await register({ plugin: "slack", name: "mivid-studios", secrets: { signing_secret: "s1" } });
