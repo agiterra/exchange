@@ -337,6 +337,9 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       const { verifyForwardedJwt } = await import("./federation.js");
       const { peer, envelope } = await verifyForwardedJwt(jwt, body, store);
       // Route through normal pipeline so local storage + delivery both happen.
+      // forwarded:true marks this as already one federation hop in — the router
+      // delivers it locally or stores it for replay, but will NOT re-forward it
+      // to another peer (SINGLE-HOP; prevents the the-wire⇄patisserie loop).
       const { message, deliveries } = router.route({
         source: envelope.source,
         source_id: envelope.source_id ?? undefined,
@@ -346,6 +349,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
         topic: envelope.topic,
         payload: envelope.payload,
         raw: envelope.raw ?? undefined,
+        forwarded: true,
       });
       store.updatePeerLastSeen(peer.name, Date.now());
       return c.json({ seq: message.seq, delivered_to: deliveries, forwarded_by: peer.name });

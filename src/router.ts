@@ -41,6 +41,15 @@ export type RouteInput = {
   topic: string;
   payload: string;
   raw?: string;
+  /**
+   * True when this message arrived via a peer's /peers/forward (i.e. it has
+   * ALREADY been federated one hop). SINGLE-HOP rule: a forwarded message is
+   * terminal — delivered locally if the dest is connected here, else stored
+   * for replay, but NEVER re-forwarded. Without this, an offline/greyed agent
+   * that both brokers claim makes a message ping-pong the-wire⇄patisserie
+   * forever (no associative/multi-hop forwarding by design).
+   */
+  forwarded?: boolean;
 };
 
 export class Router {
@@ -152,11 +161,22 @@ export class Router {
         delivered = this.emitter.emit(agentId, data, stored.seq);
       }
 
-      // If offline locally AND this is a unicast + federation is on,
-      // try to forward to a peer that claims this agent. The forward is
-      // fire-and-forget — the HTTP caller sees status="forwarding"
-      // immediately; success/failure lands in logs.
+      // If offline locally AND this is a unicast + federation is on, try to
+      // forward to a peer that claims this agent — but ONLY for messages that
+      // haven't already been federated. SINGLE-HOP: a message that arrived via
+      // /peers/forward is terminal here (deliver-or-store, never re-forward).
+      // Re-forwarding an already-forwarded message is what loops it between
+      // peers when an offline/greyed agent is claimed on both sides; we do not
+      // do associative/multi-hop forwarding by design.
       if (!delivered && msg.dest && this.federation) {
+        if (msg.forwarded) {
+          // Terminal: already one hop in. It's persisted locally (writeMessage
+          // in route) for replay when the agent connects HERE; its home broker
+          // also holds a copy. Stop — do not bounce it back.
+          this.store.logDelivery(stored.seq, agentId, "forward_terminal_offline");
+          deliveries.push({ agentId, status: "offline" });
+          continue;
+        }
         this.dispatchFederationForward(stored, agentId, msg).catch((e) => {
           this.log.error({ event: "federation_dispatch_error", dest: agentId, err: e }, "federation dispatch failed");
         });

@@ -73,3 +73,40 @@ describe("Router.replay — chunked async backlog", () => {
     expect(w.seqs()).toEqual([5]);
   });
 });
+
+describe("Router federation single-hop forwarding", () => {
+  // Minimal federation hook. `identity` is only dereferenced inside
+  // forwardToPeer, which is never reached here (no peers registered), so a
+  // stub is safe — these tests assert on the deliver() branch, not the network.
+  const fedHook = { ourPeerName: "test-self", identity: {} as any };
+
+  test("a NON-forwarded offline unicast enters federation forwarding", () => {
+    router.setFederation(fedHook);
+    const { deliveries } = router.route({ source: "x", dest: "ghost", topic: "ipc", payload: "{}" });
+    expect(deliveries[0]).toMatchObject({ agentId: "ghost", status: "forwarded" });
+  });
+
+  test("a FORWARDED offline unicast is TERMINAL — never re-forwarded (single hop)", () => {
+    router.setFederation(fedHook);
+    const { message, deliveries } = router.route({
+      source: "x", dest: "ghost", topic: "ipc", payload: "{}", forwarded: true,
+    });
+    // 'offline' (stored for replay), NOT 'forwarded' — re-forwarding would loop
+    // it back to the peer that sent it.
+    expect(deliveries[0]).toMatchObject({ agentId: "ghost", status: "offline" });
+    // still persisted locally so the agent gets it on replay if it connects here
+    expect(message.seq).toBeGreaterThan(0);
+  });
+
+  test("a FORWARDED message to a LOCALLY-connected agent still delivers", () => {
+    router.setFederation(fedHook);
+    const sess = store.createSession("ag");
+    const w = mockWriter();
+    emitter.register("ag", sess.id, w.writer);
+    const { deliveries } = router.route({
+      source: "x", dest: "ag", topic: "ipc", payload: "{}", forwarded: true,
+    });
+    expect(deliveries[0]).toMatchObject({ agentId: "ag", status: "delivered" });
+    expect(w.seqs().length).toBe(1);
+  });
+});
