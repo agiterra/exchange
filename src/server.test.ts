@@ -319,3 +319,47 @@ describe("plugin_settings mutation events — scoped to the namespace owner, not
     expect(anyDelivery.n).toBe(0);
   });
 });
+
+describe("POST /agents/register — only PERMANENT agents (personai) may sponsor a new ephemeral", () => {
+  function b64url(bytes: Uint8Array): string {
+    return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  async function sha256hex(s: string): Promise<string> {
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  // Register `id` with a real Ed25519 pubkey; return its private key for signing.
+  async function makeSponsor(id: string, permanent: boolean): Promise<CryptoKey> {
+    const kp = (await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])) as CryptoKeyPair;
+    const jwk = await crypto.subtle.exportKey("jwk", kp.publicKey);
+    const xUrl = jwk.x as string;
+    const pubB64 = xUrl.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (xUrl.length % 4)) % 4);
+    store.upsertAgent({ id, display_name: id, pubkey: pubB64, permanent });
+    return kp.privateKey;
+  }
+  async function signedRegister(privateKey: CryptoKey, iss: string, body: object) {
+    const raw = JSON.stringify(body);
+    const header = b64url(new TextEncoder().encode(JSON.stringify({ alg: "EdDSA", typ: "JWT" })));
+    const payload = b64url(new TextEncoder().encode(JSON.stringify({ iss, iat: Math.floor(Date.now() / 1000), body_hash: await sha256hex(raw) })));
+    const signingInput = `${header}.${payload}`;
+    const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, new TextEncoder().encode(signingInput)));
+    return fetch(`${baseUrl}/agents/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${signingInput}.${b64url(sig)}` },
+      body: raw,
+    });
+  }
+
+  test("an EPHEMERAL sponsor is rejected (403 sponsor_not_permanent)", async () => {
+    const priv = await makeSponsor("eng-ephemeral", false);
+    const res = await signedRegister(priv, "eng-ephemeral", { id: "spawnee", display_name: "spawnee", pubkey: "pk-spawnee" });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code?: string }).code).toBe("sponsor_not_permanent");
+  });
+
+  test("a PERMANENT sponsor (personai) is accepted", async () => {
+    const priv = await makeSponsor("director", true);
+    const res = await signedRegister(priv, "director", { id: "spawnee2", display_name: "spawnee2", pubkey: "pk-spawnee2" });
+    expect(res.ok).toBe(true);
+  });
+});

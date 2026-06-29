@@ -281,6 +281,44 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     }
   }
 
+  /**
+   * Require operator auth or a JWT signed by a PERMANENT agent (personai).
+   * Ephemeral agents may NOT sponsor new agent registrations — they have CC
+   * subagents for parallel work, which never touch the Wire. This gate is what
+   * stops an ephemeral from spawning other ephemerals: only a personai (or the
+   * operator) can sponsor a new agent onto the Wire.
+   */
+  async function requirePermanentAgentOrOperator(c: Context): Promise<Response | null> {
+    if (isOperator(c)) return null;
+
+    const authHeader = c.req.header("authorization");
+    if (!authHeader?.startsWith("Bearer ")) {
+      return c.json({ error: "Authorization: Bearer <JWT> or operator session required" }, 401);
+    }
+
+    try {
+      const { sender } = await verifyJwt(
+        { authorization: authHeader },
+        (c as any).get("rawBody") ?? "",
+        store,
+      );
+      const sponsor = store.getAgent(sender);
+      if (!sponsor) return c.json({ error: `sponsor '${sender}' not registered` }, 403);
+      if (!sponsor.permanent) {
+        return c.json(
+          {
+            error: `sponsor '${sender}' is ephemeral; only permanent agents (personai) or the operator may sponsor new agent registrations`,
+            code: "sponsor_not_permanent",
+          },
+          403,
+        );
+      }
+      return null;
+    } catch (e: any) {
+      return c.json({ error: `JWT verification failed: ${e.message}` }, 403);
+    }
+  }
+
   // --- Health ---
 
   app.get("/health", (c) => {
@@ -436,10 +474,11 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       if (err) return err;
     } else if (existing && !existing.permanent && !isGreyed) {
       authPath = "ephemeral-reregister";
-      // Ephemeral agent re-registering while still alive — allow the agent itself or any sponsoring agent
+      // Ephemeral agent re-registering while still alive — allow the agent
+      // itself, or a PERMANENT sponsor (personai). An ephemeral may not sponsor.
       const selfErr = await requireAgent(c, id);
       if (selfErr) {
-        const sponsorErr = await requireAgentOrOperator(c);
+        const sponsorErr = await requirePermanentAgentOrOperator(c);
         if (sponsorErr) return sponsorErr;
       }
     } else if (permanent) {
@@ -457,12 +496,14 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       // practice (clearReap only fires on /connect and /heartbeat, both
       // gated by JWT), but registers should require auth as a hard rule.
       //
-      // Truly new ephemeral: requires sponsor or operator auth.
+      // Truly new ephemeral: requires a PERMANENT sponsor (personai) or the
+      // operator. Ephemerals may not sponsor new agents — they use CC subagents
+      // for parallel work, which never register on the Wire.
       if (isGreyed && existing!.pubkey === pubkey) {
         const err = await requireAgent(c, id);
         if (err) return err;
       } else {
-        const err = await requireAgentOrOperator(c);
+        const err = await requirePermanentAgentOrOperator(c);
         if (err) return err;
       }
     }
