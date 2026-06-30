@@ -112,6 +112,32 @@ describe("WebAuthn auth — assertion is actually verified (no credential-id byp
   });
 });
 
+describe("GET /peers/agents/:id — claims DELIVERABILITY (live session), not mere registration", () => {
+  // Regression: a peer that holds only an agent row (registered here but
+  // connected on another broker, or a stale row) must NOT claim the agent,
+  // or the sender's findPeerForAgent forwards to a broker where it's offline
+  // and the message is silently stored, never delivered (2026-06-30 fournil
+  // hijack of brioche/fondant/herald).
+  test("registered agent with NO live session → 404", async () => {
+    // "fondant" is upserted in beforeEach (agent row) but has no session.
+    const res = await fetch(`${baseUrl}/peers/agents/fondant`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ ok: false, id: "fondant" });
+  });
+
+  test("agent with a connected session → 200", async () => {
+    store.createSession("fondant");
+    const res = await fetch(`${baseUrl}/peers/agents/fondant`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, id: "fondant" });
+  });
+
+  test("unknown agent → 404", async () => {
+    const res = await fetch(`${baseUrl}/peers/agents/nobody`);
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("POST /agents/register — click-to-attach self-report fields", () => {
   function registerAgent(body: Record<string, unknown>) {
     return fetch(`${baseUrl}/agents/register?token=${TOKEN}`, {

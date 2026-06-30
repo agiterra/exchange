@@ -284,8 +284,28 @@ export type Peer = {
   notes: string | null;
 };
 
+/**
+ * Lifecycle event the store hands to an injected sink on reap. Inlined (not
+ * imported from server-plugins.ts) so the store never depends on the bus —
+ * index.ts wires `store.setLifecycleSink((ev) => bus.emit(ev))`. Structurally
+ * identical to ServerPluginEvent, so it's assignable without a shared import.
+ */
+export type StoreLifecycleEvent = {
+  type: "agent_reaped";
+  agent_id: string;
+  pubkey: string;
+  reason: "timeout" | "clean_disconnect";
+  at: number;
+};
+
 export class Store {
   private db: Database;
+  private lifecycleSink?: (ev: StoreLifecycleEvent) => void;
+
+  /** Inject a lifecycle sink (index.ts wires this to ServerPluginBus.emit). */
+  setLifecycleSink(fn: (ev: StoreLifecycleEvent) => void): void {
+    this.lifecycleSink = fn;
+  }
 
   constructor(dbPath?: string) {
     const path = dbPath ?? process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
@@ -1030,11 +1050,26 @@ export class Store {
     `).all(cutoff, cutoff) as { id: string }[]).map((r) => r.id);
   }
 
-  /** Mark an agent as greyed-out. Idempotent. */
-  softReapAgent(id: string): void {
-    this.db.prepare(
+  /**
+   * Mark an agent as greyed-out. Idempotent. Fires the lifecycle sink (if any)
+   * with `agent_reaped` ONLY when this call actually transitioned the row, so
+   * repeated reaps never double-emit. Both the reconciler-timeout path and the
+   * clean-disconnect path flow through here, so a server plugin gets a single
+   * consistent reap signal — they cannot diverge (design §3.3). The pubkey is
+   * included so a consumer can avoid clobbering a delegation that a fast-respawn
+   * same-id agent already re-granted under a NEW key (TOCTOU defense, §5.3).
+   */
+  softReapAgent(id: string, reason: "timeout" | "clean_disconnect" = "timeout"): void {
+    const at = Date.now();
+    const res = this.db.prepare(
       "UPDATE agents SET reaped_at = ? WHERE id = ? AND reaped_at IS NULL",
-    ).run(Date.now(), id);
+    ).run(at, id);
+    if (res.changes > 0 && this.lifecycleSink) {
+      const row = this.db.prepare("SELECT pubkey FROM agents WHERE id = ?").get(id) as
+        | { pubkey: string }
+        | undefined;
+      this.lifecycleSink({ type: "agent_reaped", agent_id: id, pubkey: row?.pubkey ?? "", reason, at });
+    }
   }
 
   /**

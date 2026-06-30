@@ -34,6 +34,7 @@ config({ path: join(homedir(), ".wire", ".env") });
 import { Store } from "./store.js";
 import { Router } from "./router.js";
 import { MessageEmitter } from "./emitter.js";
+import { ServerPluginBus, loadServerPlugins } from "./server-plugins.js";
 import { createServer, runCleanup } from "./server.js";
 import { HeartbeatScheduler } from "./heartbeat.js";
 import { runCli } from "./cli.js";
@@ -99,6 +100,22 @@ log.info({ event: "server_identity", pubkey: serverIdentity.pubkeyB64 }, "server
 const ourPeerName = (process.env.WIRE_PEER_NAME ?? "").trim() || require("os").hostname().toLowerCase();
 
 const router = new Router(store, emitter, log, { ourPeerName, identity: serverIdentity });
+
+// Server-plugin lifecycle bus — delivers generic broker lifecycle events
+// (e.g. agent_reaped) to config-declared Wire Server Plugins (sidecars enrolled
+// as permanent integration agents, e.g. `wallet`). Absent a serverPlugins
+// config the bus is never wired, so the store fires no sink — behavior is
+// byte-identical to before for existing deployments.
+const serverPlugins = loadServerPlugins(log);
+if (serverPlugins.length) {
+  const serverPluginBus = new ServerPluginBus(serverPlugins, router, log);
+  store.setLifecycleSink((ev) => serverPluginBus.emit(ev));
+  log.info(
+    { event: "server_plugins_loaded", plugins: serverPlugins.map((p) => p.agentId) },
+    "server-plugin lifecycle bus active",
+  );
+}
+
 const heartbeats = new HeartbeatScheduler(store, router, log);
 
 /**

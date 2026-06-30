@@ -326,13 +326,22 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   });
 
   // --- Federation (v1.1.0) ---
-  // GET /peers/agents/:id  — unauthenticated existence probe. Returns
-  //   200 if the agent is locally registered, 404 otherwise. Peers call
-  //   this to decide whether to forward a message to us.
+  // GET /peers/agents/:id  — unauthenticated deliverability probe. Returns
+  //   200 ONLY if the agent has a LIVE (connected) session here, 404 otherwise.
+  //   Peers call this to decide whether to forward a message to us, so the
+  //   answer must reflect deliverability, NOT mere registration. A bare agent
+  //   row (registered here but connected on another broker, or a stale row
+  //   left over from an old run) must NOT claim the agent: if it does, the
+  //   sending broker's findPeerForAgent forwards to a broker where the agent
+  //   is offline, and the message is silently stored there, never delivered.
+  //   2026-06-30: fournil held stale rows for brioche/fondant/herald (0 live
+  //   sessions) and hijacked their federated delivery for ~50 min. Gating on a
+  //   connected session is the durable fix — a session-blind broker claims
+  //   nothing and routing resolves to the agent's real home.
   app.get("/peers/agents/:id", (c) => {
     const id = c.req.param("id");
-    const agent = store.getAgent(id);
-    if (agent) return c.json({ ok: true, id });
+    const hasLiveSession = store.getActiveSessions(id).length > 0;
+    if (hasLiveSession) return c.json({ ok: true, id });
     return c.json({ ok: false, id }, 404);
   });
 
@@ -588,7 +597,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     //   "Fondant should not be hard-deleting anyone, ever."
     const reapGraceMs = parseInt(process.env.REAP_GRACE_MS ?? "20000", 10);
     if (!store.agentHasLiveSession(agentId, reapGraceMs)) {
-      store.softReapAgent(agentId);
+      store.softReapAgent(agentId, "clean_disconnect");
       log.info({ event: "agent_soft_reap", agent: agentId, via: "clean_disconnect" }, `agent ${agentId} → greyed (clean shutdown)`);
     }
     notifyDashboard();
