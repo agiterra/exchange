@@ -31,7 +31,7 @@ beforeEach(() => {
   prevToken = process.env.WIRE_DASHBOARD_TOKEN;
   process.env.WIRE_DASHBOARD_TOKEN = TOKEN;
 
-  server = createServer({ port: 0, store, router, emitter, log, heartbeats });
+  server = createServer({ port: 0, store, router, emitter, log, heartbeats, serverPluginIds: new Set(["plugin-svc"]) });
   baseUrl = `http://localhost:${server.port}`;
 });
 
@@ -387,5 +387,86 @@ describe("POST /agents/register — only PERMANENT agents (personai) may sponsor
     const priv = await makeSponsor("director", true);
     const res = await signedRegister(priv, "director", { id: "spawnee2", display_name: "spawnee2", pubkey: "pk-spawnee2" });
     expect(res.ok).toBe(true);
+  });
+});
+
+describe("Change A — POST /peers/forward fails CLOSED for server-plugin dests (§3.4 v1)", () => {
+  async function forward(envelope: Record<string, unknown>) {
+    const { loadOrCreateServerIdentity } = await import("./identity");
+    const { signForwardedEnvelope } = await import("./federation");
+    const identity = await loadOrCreateServerIdentity(join(tmpDir, "peer.key"));
+    store.createPeer({ name: "laptop", base_url: "https://laptop.local", pubkey: identity.pubkeyB64 });
+    const { jwt, body } = await signForwardedEnvelope("laptop", identity, envelope as any);
+    return fetch(`${baseUrl}/peers/forward`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+      body,
+    });
+  }
+
+  test("forwarded message to a server-plugin identity is rejected 403 with a clear code", async () => {
+    store.upsertAgent({ id: "plugin-svc", display_name: "plugin-svc", pubkey: "pk-plugin", permanent: true, kind: "integration" });
+    const res = await forward({ source: "brioche", dest: "plugin-svc", topic: "ipc", payload: "{}" });
+    expect(res.status).toBe(403);
+    const json = await res.json() as { error: string };
+    expect(json.error).toBe("cross-broker-server-plugin-not-enabled");
+    // Nothing persisted — the message must not exist for later replay either.
+    expect(store.getMessages(0).filter((m) => m.dest === "plugin-svc").length).toBe(0);
+  });
+
+  test("forwarded message to a NORMAL agent still routes (fail-closed gate is plugin-only)", async () => {
+    const res = await forward({ source: "brioche", dest: "fondant", topic: "ipc", payload: "{}" });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { seq: number };
+    expect(json.seq).toBeGreaterThan(0);
+  });
+});
+
+describe("Change A — JWT webhook ingress persists the VERIFIED sender pubkey", () => {
+  function b64url(buf: ArrayBuffer | Uint8Array): string {
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  test("POST /webhooks/:agent/:plugin with a real signed JWT → stored message carries source_pubkey", async () => {
+    // Real Ed25519 keypair; register the sender with its RAW pubkey (base64,
+    // same encoding verifyJwt feeds to atob()).
+    const kp = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]) as CryptoKeyPair;
+    const rawPub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+    const pubkeyB64 = btoa(String.fromCharCode(...rawPub));
+    store.upsertAgent({ id: "brioche", display_name: "brioche", pubkey: pubkeyB64, permanent: true });
+
+    const body = JSON.stringify({ from: "brioche", text: "hi" });
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+    const bodyHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const header = b64url(new TextEncoder().encode(JSON.stringify({ alg: "EdDSA", typ: "JWT" })));
+    const payload = b64url(new TextEncoder().encode(JSON.stringify({ iss: "brioche", iat: Math.floor(Date.now() / 1000), body_hash: bodyHash })));
+    const sig = await crypto.subtle.sign("Ed25519", kp.privateKey, new TextEncoder().encode(`${header}.${payload}`));
+    const jwt = `${header}.${payload}.${b64url(sig)}`;
+
+    const res = await fetch(`${baseUrl}/webhooks/fondant/ipc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    const stored = store.getMessages(0).find((m) => m.dest === "fondant" && m.source === "brioche");
+    expect(stored).toBeDefined();
+    expect(stored!.source_pubkey).toBe(pubkeyB64);
+  });
+
+  test("operator send (no agent JWT) stores NO source_pubkey", async () => {
+    const res = await fetch(`${baseUrl}/agents/fondant/message?token=${TOKEN}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "hello" }),
+    });
+    expect(res.status).toBe(200);
+    const stored = store.getMessages(0).find((m) => m.dest === "fondant" && m.topic === "ipc");
+    expect(stored).toBeDefined();
+    expect(stored!.source_pubkey).toBeNull();
   });
 });

@@ -188,6 +188,11 @@ export type Message = {
   source: string;
   source_id: string | null;
   source_cc_session: string | null;
+  /** Ed25519 pubkey the broker VERIFIED the sender's JWT against at ingress.
+   *  NULL for non-JWT ingress (external webhooks via validator, operator sends,
+   *  server-internal 'wire' messages, forwarded federation traffic). Persisted
+   *  so replayed frames carry the same verified identity as live ones. */
+  source_pubkey: string | null;
   dest: string | null;
   topic: string;
   payload: string;
@@ -341,6 +346,13 @@ export class Store {
     const msgCols = this.db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
     if (!msgCols.some((c) => c.name === "source_cc_session")) {
       this.db.exec("ALTER TABLE messages ADD COLUMN source_cc_session TEXT");
+    }
+
+    // Add source_pubkey to messages — broker-verified sender pubkey (Change A,
+    // design-wallet-wire-server-plugin §3.2). Only surfaced to server-plugin
+    // recipients at delivery; persisted so replay carries it too.
+    if (!msgCols.some((c) => c.name === "source_pubkey")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN source_pubkey TEXT");
     }
 
     // Add filter + meta columns to webhooks (name plugin infrastructure)
@@ -517,6 +529,7 @@ export class Store {
     source: string;
     source_id?: string;
     source_cc_session?: string;
+    source_pubkey?: string;
     dest?: string;
     topic: string;
     payload: string;
@@ -524,10 +537,10 @@ export class Store {
   }): Message {
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO messages (created_at, source, source_id, source_cc_session, dest, topic, payload, raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (created_at, source, source_id, source_cc_session, source_pubkey, dest, topic, payload, raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(now, msg.source, msg.source_id ?? null, msg.source_cc_session ?? null, msg.dest ?? null, msg.topic, msg.payload, msg.raw ?? null);
+    stmt.run(now, msg.source, msg.source_id ?? null, msg.source_cc_session ?? null, msg.source_pubkey ?? null, msg.dest ?? null, msg.topic, msg.payload, msg.raw ?? null);
     const seq = this.db.prepare("SELECT last_insert_rowid() as seq").get() as { seq: number };
     return {
       seq: seq.seq,
@@ -535,6 +548,7 @@ export class Store {
       source: msg.source,
       source_id: msg.source_id ?? null,
       source_cc_session: msg.source_cc_session ?? null,
+      source_pubkey: msg.source_pubkey ?? null,
       dest: msg.dest ?? null,
       topic: msg.topic,
       payload: msg.payload,

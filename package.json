@@ -1,6 +1,6 @@
 {
   "name": "@agiterra/wire",
-  "version": "1.17.2",
+  "version": "1.18.0",
   "description": "The Wire — persistent multi-agent message broker, event log, and registry.",
   "type": "module",
   "scripts": {

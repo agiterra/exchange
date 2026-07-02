@@ -79,6 +79,11 @@ type ServerDeps = {
   emitter: MessageEmitter;
   log: Logger;
   heartbeats: import("./heartbeat.js").HeartbeatScheduler;
+  /** Reserved identities of config-declared server plugins. Forwarded
+   *  federation traffic addressed to these is REJECTED (fail closed, design
+   *  §3.4 v1): the original sender's signature is never re-verified at home,
+   *  so cross-broker traffic must not reach a plugin's authorization path. */
+  serverPluginIds?: Set<string>;
   /** Called on any clean session-end path (reconnect dedup + /agents/disconnect).
    *  Used by index.ts to purge session-scoped webhooks immediately rather than
    *  waiting for the reconciler. */
@@ -102,7 +107,7 @@ async function verifyJwt(
   headers: Record<string, string>,
   rawBody: string,
   store: Store,
-): Promise<{ sender: string; sender_display_name: string; claims: Record<string, unknown> }> {
+): Promise<{ sender: string; sender_display_name: string; pubkey: string; claims: Record<string, unknown> }> {
   const authHeader = headers["authorization"] ?? "";
   if (!authHeader.startsWith("Bearer ")) {
     throw new Error("missing bearer token");
@@ -134,7 +139,9 @@ async function verifyJwt(
   const bodyHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (bodyHash !== claims.body_hash) throw new Error("body hash mismatch");
 
-  return { sender, sender_display_name: agent.display_name, claims };
+  // pubkey is the key the signature was VERIFIED against (Change A §3.2) —
+  // callers may thread it into RouteInput.source_pubkey for plugin recipients.
+  return { sender, sender_display_name: agent.display_name, pubkey: agent.pubkey, claims };
 }
 
 /**
@@ -151,7 +158,7 @@ export async function runCleanup(
   await fn(ctx.meta, ctx.secrets, fetch);
 }
 
-export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd }: ServerDeps) {
+export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd, serverPluginIds = new Set() }: ServerDeps) {
   _serverLog = log;
   const app = new Hono();
 
@@ -383,6 +390,23 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     try {
       const { verifyForwardedJwt } = await import("./federation.js");
       const { peer, envelope } = await verifyForwardedJwt(jwt, body, store);
+      // FAIL CLOSED for server-plugin destinations (design §3.4 v1): the outer
+      // JWT proves only which PEER forwarded this — the original agent's
+      // signature is never re-verified here, so envelope.source is an opaque
+      // string a compromised/buggy peer could set to anyone. A server plugin
+      // (wallet, crew-service, …) must never authorize off transitive peer
+      // trust; requesters must be on the plugin's home broker until the v1.1
+      // end-to-end re-verification path lands.
+      if (envelope.dest && serverPluginIds.has(envelope.dest)) {
+        log.warn(
+          { event: "forward_to_server_plugin_rejected", dest: envelope.dest, peer: peer.name, source: envelope.source, topic: envelope.topic },
+          "rejected forwarded message to server-plugin identity (fail closed)",
+        );
+        return c.json({
+          error: "cross-broker-server-plugin-not-enabled",
+          detail: `dest '${envelope.dest}' is a server plugin on this broker; forwarded (federated) traffic to server plugins is rejected — the sender must be registered on this broker`,
+        }, 403);
+      }
       // Route through normal pipeline so local storage + delivery both happen.
       // forwarded:true marks this as already one federation hop in — the router
       // delivers it locally or stores it for replay, but will NOT re-forward it
@@ -987,6 +1011,9 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     c.req.raw.headers.forEach((v, k) => { headers[k] = v; });
 
     let source = agentId;
+    // Broker-verified sender pubkey — set ONLY when this request authenticated
+    // via a JWT we verified (never from validator output or message contents).
+    let sourcePubkey: string | undefined;
     let topic = `webhook.${plugin}`;
     let parsedBody: unknown;
     try { parsedBody = JSON.parse(rawBody); } catch { parsedBody = rawBody; }
@@ -1019,8 +1046,9 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
         }
       } else {
         try {
-          const { sender } = await verifyJwt(headers, rawBody, store);
+          const { sender, pubkey } = await verifyJwt(headers, rawBody, store);
           source = sender;
+          sourcePubkey = pubkey;
         } catch (e) {
           return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
         }
@@ -1067,8 +1095,9 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       }
     } else {
       try {
-        const { sender } = await verifyJwt(headers, rawBody, store);
+        const { sender, pubkey } = await verifyJwt(headers, rawBody, store);
         source = sender;
+        sourcePubkey = pubkey;
       } catch (e) {
         return c.json({ error: "webhook auth failed", detail: String(e) }, 401);
       }
@@ -1091,6 +1120,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     const routeInput = {
       source,
       source_id: dedupKey,
+      source_pubkey: sourcePubkey,
       dest: agentId,
       topic,
       payload: JSON.stringify(envelope),
@@ -1161,9 +1191,11 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     }
 
     let source: string;
+    let sourcePubkey: string;
     try {
-      const { sender } = await verifyJwt(headers, rawBody, store);
+      const { sender, pubkey } = await verifyJwt(headers, rawBody, store);
       source = sender;
+      sourcePubkey = pubkey;
     } catch (e) {
       return c.json({ error: "broadcast auth failed", detail: String(e) }, 401);
     }
@@ -1181,6 +1213,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
     const { message, deliveries } = router.route({
       source,
+      source_pubkey: sourcePubkey,
       topic: `webhook.${topic}`,
       payload: JSON.stringify(envelope),
       raw: rawBody,

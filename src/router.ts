@@ -42,6 +42,14 @@ export type RouteInput = {
   payload: string;
   raw?: string;
   /**
+   * Ed25519 pubkey the ingress handler VERIFIED the sender's JWT signature
+   * against (Change A, design §3.2). Set ONLY by JWT-verified ingress paths;
+   * never trusted from message contents. Surfaced in the delivered/replayed
+   * SSE frame meta EXCLUSIVELY for config-declared server-plugin recipients —
+   * normal agent traffic is byte-identical to before.
+   */
+  source_pubkey?: string;
+  /**
    * True when this message arrived via a peer's /peers/forward (i.e. it has
    * ALREADY been federated one hop). SINGLE-HOP rule: a forwarded message is
    * terminal — delivered locally if the dest is connected here, else stored
@@ -57,6 +65,12 @@ export class Router {
   private log: Logger;
   private federation: RouterFederation | undefined;
   private discoveryCache = new DiscoveryCache(60_000);
+  /**
+   * Reserved identities of config-declared server plugins (loadServerPlugins).
+   * Delivered/replayed frames to THESE recipients — and only these — carry
+   * the broker-verified source_pubkey (Change A gate: no broad pubkey leak).
+   */
+  private serverPluginIds = new Set<string>();
 
   constructor(
     private store: Store,
@@ -79,6 +93,11 @@ export class Router {
   /** Wire up federation after construction (lets us defer identity load). */
   setFederation(federation: RouterFederation): void {
     this.federation = federation;
+  }
+
+  /** Declare which recipient identities are server plugins (see field doc). */
+  setServerPluginIds(ids: Iterable<string>): void {
+    this.serverPluginIds = new Set(ids);
   }
 
   onRoute(listener: RouteListener): () => void {
@@ -145,6 +164,9 @@ export class Router {
         payload: JSON.parse(stored.payload),
         dest: stored.dest,
         created_at: stored.created_at,
+        ...(stored.source_pubkey && this.serverPluginIds.has(agentId)
+          ? { source_pubkey: stored.source_pubkey }
+          : {}),
       });
 
       let delivered: boolean;
@@ -266,6 +288,9 @@ export class Router {
           payload: JSON.parse(msg.payload),
           dest: msg.dest,
           created_at: msg.created_at,
+          ...(msg.source_pubkey && this.serverPluginIds.has(agentId)
+            ? { source_pubkey: msg.source_pubkey }
+            : {}),
         });
         if (!this.emitter.replayWrite(agentId, sessionId, data, msg.seq)) {
           return; // session gone mid-replay — endReplay() (finally) no-ops

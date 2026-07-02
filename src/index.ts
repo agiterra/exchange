@@ -107,6 +107,11 @@ const router = new Router(store, emitter, log, { ourPeerName, identity: serverId
 // config the bus is never wired, so the store fires no sink — behavior is
 // byte-identical to before for existing deployments.
 const serverPlugins = loadServerPlugins(log);
+// Change A gate: frames delivered/replayed to these identities carry the
+// broker-verified source_pubkey; forwarded federation traffic to them is
+// rejected at /peers/forward (fail closed, §3.4 v1). Empty set = no-ops.
+const serverPluginIds = new Set(serverPlugins.map((p) => p.agentId));
+router.setServerPluginIds(serverPluginIds);
 if (serverPlugins.length) {
   const serverPluginBus = new ServerPluginBus(serverPlugins, router, log);
   store.setLifecycleSink((ev) => serverPluginBus.emit(ev));
@@ -143,7 +148,7 @@ function purgeSessionScopedWebhooks(sessionId: string): void {
   }
 }
 
-const server = createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd: purgeSessionScopedWebhooks });
+const server = createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd: purgeSessionScopedWebhooks, serverPluginIds });
 heartbeats.start();
 
 // Boot-time peer announcement (v1.1.0 federation). If we have a public

@@ -110,3 +110,62 @@ describe("Router federation single-hop forwarding", () => {
     expect(w.seqs().length).toBe(1);
   });
 });
+
+describe("Change A — source_pubkey surfaced ONLY to server-plugin recipients", () => {
+  // Frames are SSE-formatted ("id: N\ndata: {...}"); pull the JSON meta out.
+  function frameMeta(frame: string): Record<string, unknown> {
+    const m = frame.match(/data: (.*)/);
+    return JSON.parse(m![1]);
+  }
+
+  beforeEach(() => {
+    store.upsertAgent({ id: "plugin-svc", display_name: "plugin-svc", pubkey: "pk-plugin", permanent: true, kind: "integration" });
+    router.setServerPluginIds(["plugin-svc"]);
+  });
+
+  test("unicast to a server plugin carries the verified source_pubkey", () => {
+    const sess = store.createSession("plugin-svc");
+    const w = mockWriter();
+    emitter.register("plugin-svc", sess.id, w.writer);
+    router.route({ source: "ag", source_pubkey: "PK-VERIFIED", dest: "plugin-svc", topic: "ipc", payload: "{}" });
+    expect(frameMeta(w.frames[0]).source_pubkey).toBe("PK-VERIFIED");
+  });
+
+  test("unicast to a NORMAL agent never carries source_pubkey (no broad leak)", () => {
+    const sess = store.createSession("ag");
+    const w = mockWriter();
+    emitter.register("ag", sess.id, w.writer);
+    router.route({ source: "x", source_pubkey: "PK-VERIFIED", dest: "ag", topic: "ipc", payload: "{}" });
+    expect(frameMeta(w.frames[0]).source_pubkey).toBeUndefined();
+  });
+
+  test("broadcast: plugin recipient sees the pubkey, normal agent does not", () => {
+    const sessAg = store.createSession("ag");
+    const sessPl = store.createSession("plugin-svc");
+    const wAg = mockWriter();
+    const wPl = mockWriter();
+    emitter.register("ag", sessAg.id, wAg.writer);
+    emitter.register("plugin-svc", sessPl.id, wPl.writer);
+    router.route({ source: "x", source_pubkey: "PK-VERIFIED", topic: "ipc", payload: "{}" });
+    expect(frameMeta(wPl.frames[0]).source_pubkey).toBe("PK-VERIFIED");
+    expect(frameMeta(wAg.frames[0]).source_pubkey).toBeUndefined();
+  });
+
+  test("REPLAYED backlog to a plugin carries the persisted source_pubkey", async () => {
+    // Route while the plugin is offline → message persists with the pubkey.
+    router.route({ source: "ag", source_pubkey: "PK-VERIFIED", dest: "plugin-svc", topic: "ipc", payload: "{}" });
+    const sess = store.createSession("plugin-svc");
+    const w = mockWriter();
+    emitter.register("plugin-svc", sess.id, w.writer);
+    await router.replay("plugin-svc", sess.id);
+    expect(frameMeta(w.frames[0]).source_pubkey).toBe("PK-VERIFIED");
+  });
+
+  test("message routed WITHOUT source_pubkey has no field even for a plugin", () => {
+    const sess = store.createSession("plugin-svc");
+    const w = mockWriter();
+    emitter.register("plugin-svc", sess.id, w.writer);
+    router.route({ source: "wire", dest: "plugin-svc", topic: "server-plugin.lifecycle.agent_reaped", payload: "{}" });
+    expect(frameMeta(w.frames[0]).source_pubkey).toBeUndefined();
+  });
+});
