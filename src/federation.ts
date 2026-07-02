@@ -143,9 +143,13 @@ export async function verifyForwardedJwt(
  * on 404, throws on anything else (auth / network / unexpected).
  */
 export async function peerHasAgent(peer: Peer, agentId: string): Promise<boolean> {
+  // Hard probe timeout: a dark peer behind a live tunnel edge (fournil via
+  // ngrok, 2026-07-02) HANGS the fetch indefinitely — without this, every
+  // federated delivery on the broker stalls behind the slowest dead peer.
   const res = await fetch(`${peer.base_url}/peers/agents/${encodeURIComponent(agentId)}`, {
     method: "GET",
     headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(3_000),
   });
   if (res.status === 200) return true;
   if (res.status === 404) return false;
@@ -224,8 +228,27 @@ export async function findPeerForAgent(
       return null;
     }
   });
-  const results = await Promise.all(probes);
-  const winner = results.find((r) => r !== null) ?? null;
+  // TRUE first-positive-wins: resolve the moment ANY probe answers yes —
+  // do not wait for the losers (Promise.all made every delivery wait for
+  // the slowest/hung peer; the 2026-07-02 fournil hang stalled ALL
+  // cross-broker traffic on both brokers).
+  const winner = await new Promise<Peer | null>((resolve) => {
+    let pending = probes.length;
+    let done = false;
+    for (const probe of probes) {
+      void probe.then((p) => {
+        if (p !== null && !done) {
+          done = true;
+          resolve(p);
+        }
+        pending -= 1;
+        if (pending === 0 && !done) {
+          done = true;
+          resolve(null);
+        }
+      });
+    }
+  });
   if (winner && cache) cache.set(agentId, winner.name);
   return winner;
 }

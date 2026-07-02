@@ -10,6 +10,7 @@ import {
   signRefreshJwt,
   verifyRefreshJwt,
   DiscoveryCache,
+  findPeerForAgent,
   type ForwardedEnvelope,
 } from "./federation";
 
@@ -127,3 +128,29 @@ describe("DiscoveryCache", () => {
     expect(c.size()).toBe(0);
   });
 });
+describe("findPeerForAgent first-positive-wins (2026-07-02 fournil hang)", () => {
+  test("resolves on the fast positive peer without waiting for a hung peer", async () => {
+    const fast = { name: "mini", base_url: "http://fast", pubkey: "pk1" };
+    const hung = { name: "fournil", base_url: "http://hung", pubkey: "pk2" };
+    const store = {
+      listPeers: () => [hung, fast],
+      getPeer: (n: string) => (n === "mini" ? fast : hung),
+    } as never;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.startsWith("http://fast")) return new Response("{}", { status: 200 });
+      // hung peer: never resolves within the test
+      return await new Promise<Response>(() => {});
+    }) as typeof fetch;
+    try {
+      const start = Date.now();
+      const winner = await findPeerForAgent(store, "crew-svc@patisserie");
+      expect(winner?.name).toBe("mini");
+      expect(Date.now() - start).toBeLessThan(1_000);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
