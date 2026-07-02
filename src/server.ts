@@ -79,11 +79,12 @@ type ServerDeps = {
   emitter: MessageEmitter;
   log: Logger;
   heartbeats: import("./heartbeat.js").HeartbeatScheduler;
-  /** Reserved identities of config-declared server plugins. Forwarded
-   *  federation traffic addressed to these is REJECTED (fail closed, design
-   *  §3.4 v1): the original sender's signature is never re-verified at home,
-   *  so cross-broker traffic must not reach a plugin's authorization path. */
-  serverPluginIds?: Set<string>;
+  /** Config-declared server plugins. Forwarded federation traffic addressed
+   *  to one is REJECTED unless the forwarding peer is on that plugin's
+   *  allowedPeers list (fail closed by default, design §3.4 v1): the original
+   *  sender's signature is never re-verified at home, so cross-broker traffic
+   *  must not reach a plugin's authorization path on transitive trust alone. */
+  serverPlugins?: import("./server-plugins.js").ServerPluginConfig[];
   /** Called on any clean session-end path (reconnect dedup + /agents/disconnect).
    *  Used by index.ts to purge session-scoped webhooks immediately rather than
    *  waiting for the reconciler. */
@@ -158,8 +159,9 @@ export async function runCleanup(
   await fn(ctx.meta, ctx.secrets, fetch);
 }
 
-export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd, serverPluginIds = new Set() }: ServerDeps) {
+export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd, serverPlugins = [] }: ServerDeps) {
   _serverLog = log;
+  const serverPluginByAgentId = new Map(serverPlugins.map((p) => [p.agentId, p]));
   const app = new Hono();
 
   app.use("*", cors());
@@ -394,17 +396,20 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       // JWT proves only which PEER forwarded this — the original agent's
       // signature is never re-verified here, so envelope.source is an opaque
       // string a compromised/buggy peer could set to anyone. A server plugin
-      // (wallet, crew-service, …) must never authorize off transitive peer
-      // trust; requesters must be on the plugin's home broker until the v1.1
-      // end-to-end re-verification path lands.
-      if (envelope.dest && serverPluginIds.has(envelope.dest)) {
+      // must never authorize off transitive peer trust alone, so forwarded
+      // traffic is rejected UNLESS the forwarding peer is on the plugin's
+      // explicit allowedPeers list (e.g. crew-service federating its own
+      // read-shard RPC between brokers). Allow-listed forwards still carry NO
+      // source_pubkey — plugins keep pubkey-gated methods refusing them.
+      const destPlugin = envelope.dest ? serverPluginByAgentId.get(envelope.dest) : undefined;
+      if (destPlugin && !(destPlugin.allowedPeers ?? []).includes(peer.name)) {
         log.warn(
           { event: "forward_to_server_plugin_rejected", dest: envelope.dest, peer: peer.name, source: envelope.source, topic: envelope.topic },
-          "rejected forwarded message to server-plugin identity (fail closed)",
+          "rejected forwarded message to server-plugin identity (peer not on plugin's allowedPeers; fail closed)",
         );
         return c.json({
           error: "cross-broker-server-plugin-not-enabled",
-          detail: `dest '${envelope.dest}' is a server plugin on this broker; forwarded (federated) traffic to server plugins is rejected — the sender must be registered on this broker`,
+          detail: `dest '${envelope.dest}' is a server plugin on this broker and peer '${peer.name}' is not on its allowedPeers list; forwarded (federated) traffic to server plugins is rejected by default — the sender must be registered on this broker`,
         }, 403);
       }
       // Route through normal pipeline so local storage + delivery both happen.

@@ -76,7 +76,8 @@ describe("ServerPluginBus + store reap lifecycle (design §3.1/§3.3)", () => {
   test("loadServerPlugins parses WIRE_SERVER_PLUGINS env JSON array", () => {
     const prev = process.env.WIRE_SERVER_PLUGINS;
     process.env.WIRE_SERVER_PLUGINS = JSON.stringify([{ name: "wallet", agentId: "wallet", events: ["agent_reaped"] }]);
-    expect(loadServerPlugins()).toEqual([{ name: "wallet", agentId: "wallet", events: ["agent_reaped"] }]);
+    // allowedPeers defaults to [] (fail closed) when the config omits it.
+    expect(loadServerPlugins()).toEqual([{ name: "wallet", agentId: "wallet", events: ["agent_reaped"], allowedPeers: [] }]);
     if (prev === undefined) delete process.env.WIRE_SERVER_PLUGINS; else process.env.WIRE_SERVER_PLUGINS = prev;
   });
 

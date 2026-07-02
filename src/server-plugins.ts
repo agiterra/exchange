@@ -39,6 +39,18 @@ export interface ServerPluginConfig {
   agentId: string;
   /** Generic event-type allow-list — only declared types are delivered. */
   events: string[];
+  /**
+   * Peer allow-list for FORWARDED (federated) traffic addressed to this
+   * plugin (§3.4). A forwarded envelope reaches the plugin ONLY if the
+   * forwarding peer's registered name is listed here. Default/omitted =
+   * empty = ALL forwarded traffic rejected (fail closed — correct for a
+   * money-moving plugin like wallet). A read-serving plugin that federates
+   * its own RPC (e.g. crew-service shard reads) lists its peer brokers.
+   * NOTE: an allow-listed forward still carries NO source_pubkey — the
+   * original sender is not re-verified at home (v1.1) — so plugins must
+   * keep pubkey-gated (write) methods refusing pubkey-less frames.
+   */
+  allowedPeers?: string[];
 }
 
 export class ServerPluginBus {
@@ -100,10 +112,12 @@ export function loadServerPlugins(log?: Logger): ServerPluginConfig[] {
       if (!Array.isArray(arr)) throw new Error("serverPlugins config must be a JSON array");
       return arr
         .filter((p: { agentId?: string }) => p && p.agentId)
-        .map((p: { name?: string; agentId: string; events?: unknown[] }) => ({
+        .map((p: { name?: string; agentId: string; events?: unknown[]; allowedPeers?: unknown[] }) => ({
           name: String(p.name ?? p.agentId),
           agentId: String(p.agentId),
           events: Array.isArray(p.events) ? p.events.map(String) : [],
+          // absent/malformed → empty → forwarded traffic rejected (fail closed)
+          allowedPeers: Array.isArray(p.allowedPeers) ? p.allowedPeers.map(String) : [],
         }));
     } catch (e) {
       log?.error({ event: "server_plugins_config_error", src, err: e }, "invalid serverPlugins config — ignoring");

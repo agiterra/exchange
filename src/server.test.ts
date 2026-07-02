@@ -31,7 +31,13 @@ beforeEach(() => {
   prevToken = process.env.WIRE_DASHBOARD_TOKEN;
   process.env.WIRE_DASHBOARD_TOKEN = TOKEN;
 
-  server = createServer({ port: 0, store, router, emitter, log, heartbeats, serverPluginIds: new Set(["plugin-svc"]) });
+  server = createServer({
+    port: 0, store, router, emitter, log, heartbeats,
+    serverPlugins: [
+      { name: "plugin-svc", agentId: "plugin-svc", events: [] }, // no allowedPeers → fail closed
+      { name: "crew-like", agentId: "crew-like", events: [], allowedPeers: ["laptop"] },
+    ],
+  });
   baseUrl = `http://localhost:${server.port}`;
 });
 
@@ -468,5 +474,50 @@ describe("Change A — JWT webhook ingress persists the VERIFIED sender pubkey",
     const stored = store.getMessages(0).find((m) => m.dest === "fondant" && m.topic === "ipc");
     expect(stored).toBeDefined();
     expect(stored!.source_pubkey).toBeNull();
+  });
+});
+
+describe("Change A — allowedPeers opt-in: a listed peer's forwards DO reach the plugin", () => {
+  test("forwarded message to a plugin whose allowedPeers includes the peer routes normally", async () => {
+    const { loadOrCreateServerIdentity } = await import("./identity");
+    const { signForwardedEnvelope } = await import("./federation");
+    const identity = await loadOrCreateServerIdentity(join(tmpDir, "peer2.key"));
+    store.createPeer({ name: "laptop", base_url: "https://laptop.local", pubkey: identity.pubkeyB64 });
+    store.upsertAgent({ id: "crew-like", display_name: "crew-like", pubkey: "pk-crew", permanent: true, kind: "integration" });
+
+    const { jwt, body } = await signForwardedEnvelope("laptop", identity, {
+      source: "crew-svc@laptop", dest: "crew-like", topic: "rpc", payload: "{}",
+    } as any);
+    const res = await fetch(`${baseUrl}/peers/forward`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+      body,
+    });
+    expect(res.status).toBe(200);
+    const stored = store.getMessages(0).find((m) => m.dest === "crew-like");
+    expect(stored).toBeDefined();
+    // Forwarded traffic NEVER carries a verified pubkey (original sender is
+    // not re-verified at home until v1.1) — even when the peer is allow-listed.
+    expect(stored!.source_pubkey).toBeNull();
+  });
+
+  test("a DIFFERENT (unlisted) peer forwarding to the same plugin is still rejected", async () => {
+    const { loadOrCreateServerIdentity } = await import("./identity");
+    const { signForwardedEnvelope } = await import("./federation");
+    const identity = await loadOrCreateServerIdentity(join(tmpDir, "peer3.key"));
+    store.createPeer({ name: "fournil", base_url: "https://fournil.local", pubkey: identity.pubkeyB64 });
+    store.upsertAgent({ id: "crew-like", display_name: "crew-like", pubkey: "pk-crew", permanent: true, kind: "integration" });
+
+    const { jwt, body } = await signForwardedEnvelope("fournil", identity, {
+      source: "whoever", dest: "crew-like", topic: "rpc", payload: "{}",
+    } as any);
+    const res = await fetch(`${baseUrl}/peers/forward`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+      body,
+    });
+    expect(res.status).toBe(403);
+    const json = await res.json() as { error: string };
+    expect(json.error).toBe("cross-broker-server-plugin-not-enabled");
   });
 });

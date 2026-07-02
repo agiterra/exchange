@@ -148,7 +148,7 @@ function purgeSessionScopedWebhooks(sessionId: string): void {
   }
 }
 
-const server = createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd: purgeSessionScopedWebhooks, serverPluginIds });
+const server = createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd: purgeSessionScopedWebhooks, serverPlugins });
 heartbeats.start();
 
 // Boot-time peer announcement (v1.1.0 federation). If we have a public
