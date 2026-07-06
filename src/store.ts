@@ -708,13 +708,19 @@ export class Store {
     const now = Date.now();
     this.db.prepare(`
       INSERT INTO agents (id, display_name, pubkey, permanent, pronouns, kind, ssh_host, run_as_uid, screen_name, created_at, last_seen_at, reaped_at, last_seen_seq)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, COALESCE((SELECT MAX(seq) FROM messages), 0))
+      VALUES (?, ?, ?, ?, ?, COALESCE(?, 'agent'), ?, ?, ?, ?, ?, NULL, COALESCE((SELECT MAX(seq) FROM messages), 0))
       ON CONFLICT(id) DO UPDATE SET
         display_name = excluded.display_name,
         pubkey = excluded.pubkey,
         permanent = CASE WHEN excluded.permanent = 1 THEN 1 ELSE agents.permanent END,
         pronouns = COALESCE(excluded.pronouns, agents.pronouns),
-        kind = excluded.kind,
+        -- kind is sticky like the self-report fields below: most re-registrations
+        -- (WireConnection's SSE worker, older clients) omit it, and an omitted
+        -- kind must NOT demote an integration back to 'agent'. It changes only
+        -- when a caller passes it explicitly. (excluded.kind is unusable here —
+        -- the VALUES COALESCE already resolved it to 'agent' — so re-bind the
+        -- raw nullable param.)
+        kind = COALESCE(?, agents.kind),
         -- Self-report fields are sticky: a caller that omits them (e.g. an
         -- older client re-registering, or a plugin that doesn't populate
         -- them) must NOT clobber previously-reported values to NULL — same
@@ -731,12 +737,13 @@ export class Store {
       agent.pubkey,
       agent.permanent ? 1 : 0,
       agent.pronouns ?? null,
-      agent.kind ?? "agent",
+      agent.kind ?? null,
       agent.ssh_host ?? null,
       agent.run_as_uid ?? null,
       agent.screen_name ?? null,
       now,
       now,
+      agent.kind ?? null,
     );
   }
 

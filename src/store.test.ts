@@ -76,6 +76,26 @@ describe("click-to-attach self-report columns (ssh_host / run_as_uid / screen_na
   });
 });
 
+describe("agent kind stickiness", () => {
+  test("omitting kind on insert defaults to 'agent'", () => {
+    registerAgent("plain");
+    expect(store.getAgent("plain")!.kind).toBe("agent");
+  });
+
+  test("re-registering WITHOUT kind does NOT demote an integration (sticky)", () => {
+    store.upsertAgent({ id: "svc", display_name: "svc", pubkey: "pk-svc", permanent: true, kind: "integration" });
+    // WireConnection's SSE worker re-registers with no kind on every (re)connect.
+    store.upsertAgent({ id: "svc", display_name: "svc", pubkey: "pk-svc", permanent: true });
+    expect(store.getAgent("svc")!.kind).toBe("integration");
+  });
+
+  test("an explicit kind still changes the row", () => {
+    store.upsertAgent({ id: "flip", display_name: "flip", pubkey: "pk-flip", permanent: true, kind: "integration" });
+    store.upsertAgent({ id: "flip", display_name: "flip", pubkey: "pk-flip", permanent: true, kind: "agent" });
+    expect(store.getAgent("flip")!.kind).toBe("agent");
+  });
+});
+
 describe("SSE replay-on-connect — purged-sessions path", () => {
   test("new agent registered after backlog exists is NOT dumped historical broadcasts", () => {
     // System has prior chatter — broadcasts that pre-date the agent's existence.

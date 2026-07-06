@@ -126,8 +126,10 @@ export function loadServerPlugins(log?: Logger): ServerPluginConfig[] {
   };
   const env = (process.env.WIRE_SERVER_PLUGINS ?? "").trim();
   if (env) {
-    const r = parse(env, "env:WIRE_SERVER_PLUGINS");
-    if (r) return r;
+    // A present-but-malformed env config is fail-safe EMPTY, not a fallthrough
+    // to the file: the operator explicitly configured this source, and falling
+    // through would silently run a different config than the one they set.
+    return parse(env, "env:WIRE_SERVER_PLUGINS") ?? [];
   }
   const file = join(homedir(), ".wire", "server-plugins.json");
   if (existsSync(file)) {
