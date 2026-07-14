@@ -17,6 +17,7 @@
  *   POST /agents/:id/webhooks            — register webhook for agent
  *   POST /webhooks/:agent/:plugin        — inbound webhook delivery
  *   GET  /oauth/fondant/linear/callback  — durable Linear OAuth app redirect
+ *   GET  /oauth/brioche/linear/callback  — durable Linear OAuth app redirect
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
@@ -337,23 +338,34 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
   // Linear requires every OAuth application to declare at least one redirect
   // URI, even when its operational grant is client_credentials and no browser
-  // callback is used. Keep this exact, durable persona-owned endpoint available
-  // for the Fondant app manifest. It deliberately never exchanges, logs, stores,
-  // or reflects authorization codes/state. If authorization_code is selected by
+  // callback is used. Keep exact, durable persona-owned endpoints available
+  // for app manifests. They deliberately never exchange, log, store, or
+  // reflect authorization codes/state. If authorization_code is selected by
   // mistake, fail closed and direct the operator back to client_credentials.
-  app.get("/oauth/fondant/linear/callback", (c) => {
-    const attemptedAuthorizationCodeFlow =
-      c.req.query("code") !== undefined || c.req.query("error") !== undefined;
+  function linearClientCredentialsCallback(persona: "Fondant" | "Brioche") {
+    return (c: Context) => {
+      const attemptedAuthorizationCodeFlow = ["code", "state", "error"]
+        .some((param) => c.req.query(param) !== undefined);
 
-    if (attemptedAuthorizationCodeFlow) {
-      return c.text(
-        "Fondant Linear OAuth uses the client_credentials grant; no authorization code was accepted.",
-        400,
-      );
-    }
+      if (attemptedAuthorizationCodeFlow) {
+        return c.text(
+          `${persona} Linear OAuth uses the client_credentials grant; no authorization code or state was accepted.`,
+          400,
+        );
+      }
 
-    return c.text("Fondant Linear OAuth callback is ready.");
-  });
+      return c.text(`${persona} Linear OAuth callback is ready.`);
+    };
+  }
+
+  app.get(
+    "/oauth/fondant/linear/callback",
+    linearClientCredentialsCallback("Fondant"),
+  );
+  app.get(
+    "/oauth/brioche/linear/callback",
+    linearClientCredentialsCallback("Brioche"),
+  );
 
   // --- Federation (v1.1.0) ---
   // GET /peers/agents/:id  — unauthenticated deliverability probe. Returns

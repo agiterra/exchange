@@ -48,25 +48,29 @@ afterEach(() => {
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 });
 
-describe("GET /oauth/fondant/linear/callback — durable no-secret redirect", () => {
-  test("is publicly reachable for Linear app configuration", async () => {
-    const res = await fetch(`${baseUrl}/oauth/fondant/linear/callback`);
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("Fondant Linear OAuth callback is ready.");
-  });
+describe("Linear OAuth callbacks — durable no-secret redirects", () => {
+  for (const persona of ["fondant", "brioche"] as const) {
+    const displayName = persona[0].toUpperCase() + persona.slice(1);
 
-  test("fails closed without reflecting an authorization code or state", async () => {
-    const secretCode = "must-not-be-reflected";
-    const secretState = "also-must-not-be-reflected";
-    const res = await fetch(
-      `${baseUrl}/oauth/fondant/linear/callback?code=${secretCode}&state=${secretState}`,
-    );
-    const body = await res.text();
-    expect(res.status).toBe(400);
-    expect(body).not.toContain(secretCode);
-    expect(body).not.toContain(secretState);
-    expect(body).toContain("client_credentials");
-  });
+    test(`${persona} is publicly reachable for Linear app configuration`, async () => {
+      const res = await fetch(`${baseUrl}/oauth/${persona}/linear/callback`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(`${displayName} Linear OAuth callback is ready.`);
+    });
+
+    for (const param of ["code", "state", "error"] as const) {
+      test(`${persona} fails closed without reflecting ${param}`, async () => {
+        const secretValue = `${param}-must-not-be-reflected`;
+        const res = await fetch(
+          `${baseUrl}/oauth/${persona}/linear/callback?${param}=${secretValue}`,
+        );
+        const body = await res.text();
+        expect(res.status).toBe(400);
+        expect(body).not.toContain(secretValue);
+        expect(body).toContain("client_credentials");
+      });
+    }
+  }
 });
 
 function register(body: Record<string, unknown>) {
