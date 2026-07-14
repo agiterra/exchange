@@ -16,6 +16,7 @@
  *   POST /agents/:id/message             — send IPC message to agent (operator only)
  *   POST /agents/:id/webhooks            — register webhook for agent
  *   POST /webhooks/:agent/:plugin        — inbound webhook delivery
+ *   GET  /oauth/fondant/linear/callback  — durable Linear OAuth app redirect
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
@@ -332,6 +333,26 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
   app.get("/health", (c) => {
     return c.json({ status: "ok", ts: Date.now() });
+  });
+
+  // Linear requires every OAuth application to declare at least one redirect
+  // URI, even when its operational grant is client_credentials and no browser
+  // callback is used. Keep this exact, durable persona-owned endpoint available
+  // for the Fondant app manifest. It deliberately never exchanges, logs, stores,
+  // or reflects authorization codes/state. If authorization_code is selected by
+  // mistake, fail closed and direct the operator back to client_credentials.
+  app.get("/oauth/fondant/linear/callback", (c) => {
+    const attemptedAuthorizationCodeFlow =
+      c.req.query("code") !== undefined || c.req.query("error") !== undefined;
+
+    if (attemptedAuthorizationCodeFlow) {
+      return c.text(
+        "Fondant Linear OAuth uses the client_credentials grant; no authorization code was accepted.",
+        400,
+      );
+    }
+
+    return c.text("Fondant Linear OAuth callback is ready.");
   });
 
   // --- Federation (v1.1.0) ---

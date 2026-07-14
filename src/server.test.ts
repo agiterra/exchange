@@ -48,6 +48,27 @@ afterEach(() => {
   try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 });
 
+describe("GET /oauth/fondant/linear/callback — durable no-secret redirect", () => {
+  test("is publicly reachable for Linear app configuration", async () => {
+    const res = await fetch(`${baseUrl}/oauth/fondant/linear/callback`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("Fondant Linear OAuth callback is ready.");
+  });
+
+  test("fails closed without reflecting an authorization code or state", async () => {
+    const secretCode = "must-not-be-reflected";
+    const secretState = "also-must-not-be-reflected";
+    const res = await fetch(
+      `${baseUrl}/oauth/fondant/linear/callback?code=${secretCode}&state=${secretState}`,
+    );
+    const body = await res.text();
+    expect(res.status).toBe(400);
+    expect(body).not.toContain(secretCode);
+    expect(body).not.toContain(secretState);
+    expect(body).toContain("client_credentials");
+  });
+});
+
 function register(body: Record<string, unknown>) {
   return fetch(`${baseUrl}/agents/fondant/webhooks?token=${TOKEN}`, {
     method: "POST",
