@@ -21,9 +21,9 @@
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
-import { watchFile, existsSync } from "fs";
+import { watchFile, existsSync, unlinkSync } from "fs";
 import { join } from "path";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { tmpdir } from "os";
 import Database from "bun:sqlite";
 import { Hono } from "hono";
@@ -897,12 +897,13 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
         return c.json({ error: `agent '${agentId}' not found in crew database` }, 404);
       }
 
-      const tmpFile = join(tmpdir(), `wire-peek-${agentId}-${Date.now()}.txt`);
+      const safeAgentId = agentId.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const tmpFile = join(tmpdir(), `wire-peek-${safeAgentId}-${Date.now()}.txt`);
       try {
-        execSync(`/opt/homebrew/bin/screen -S ${row.screen_name} -X hardcopy ${tmpFile}`, { timeout: 5000 });
+        execFileSync("/opt/homebrew/bin/screen", ["-S", row.screen_name, "-X", "hardcopy", tmpFile], { timeout: 5000 });
         const output = Bun.file(tmpFile);
         const text = await output.text();
-        execSync(`rm -f ${tmpFile}`);
+        unlinkSync(tmpFile);
         return c.json({ agent_id: agentId, screen_name: row.screen_name, output: text.trimEnd() });
       } catch (e: any) {
         return c.json({
