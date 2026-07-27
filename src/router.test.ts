@@ -31,9 +31,46 @@ function mockWriter() {
   };
 }
 
-describe("Router.replay — chunked async backlog", () => {
+function throwingWriter(failAfterWrites: number) {
+  const frames: string[] = [];
+  let writes = 0;
+  return {
+    frames,
+    writer: {
+      write: (d: string) => {
+        if (writes >= failAfterWrites) throw new Error("Controller closed");
+        writes++;
+        frames.push(d);
+      },
+      close: () => {},
+    },
+    seqs: () =>
+      frames
+        .map((f) => { const m = f.match(/^id: (\d+)/); return m ? Number(m[1]) : null; })
+        .filter((s): s is number => s != null),
+  };
+}
+
+function controlledSleep() {
+  const delays: number[] = [];
+  const resolvers: Array<() => void> = [];
+  return {
+    delays,
+    sleep: (ms: number) => {
+      delays.push(ms);
+      if (ms === 0) return Promise.resolve();
+      return new Promise<void>((resolve) => resolvers.push(resolve));
+    },
+    resolveNext: () => {
+      const resolve = resolvers.shift();
+      if (resolve) resolve();
+    },
+  };
+}
+
+describe("Router.replay — paged async backlog", () => {
   test("delivers all backlog for the session, in seq order, across chunk boundaries", async () => {
-    // 120 backlog messages (> CHUNK=50 → multiple chunks) before any session.
+    // 120 backlog messages (> default page size 100) before any session.
     for (let i = 0; i < 120; i++) {
       router.route({ source: "x", dest: "ag", topic: "t", payload: JSON.stringify({ n: i }) });
     }
@@ -71,6 +108,64 @@ describe("Router.replay — chunked async backlog", () => {
     await router.replay("ag", sess.id);
     emitter.emit("ag", "x", 5);
     expect(w.seqs()).toEqual([5]);
+  });
+
+  test("resumes from Last-Event-ID after mid-replay disconnect without advancing durable ack", async () => {
+    for (let i = 0; i < 10; i++) {
+      router.route({ source: "x", dest: "ag", topic: "t", payload: JSON.stringify({ n: i }) });
+    }
+    const sess = store.createSession("ag");
+    const first = throwingWriter(4);
+    emitter.register("ag", sess.id, first.writer);
+
+    await router.replay("ag", sess.id);
+    expect(first.seqs()).toEqual([1, 2, 3, 4]);
+    expect(store.getSession(sess.id)?.last_ack_seq).toBe(0);
+
+    const second = mockWriter();
+    emitter.register("ag", sess.id, second.writer);
+    await router.replay("ag", sess.id, { lastEventId: 4 });
+
+    expect(second.seqs()).toEqual([5, 6, 7, 8, 9, 10]);
+    expect(store.getSession(sess.id)?.last_ack_seq).toBe(0);
+  });
+
+  test("non-advancing ack reconnect storms back off, quarantine, and do not block other live delivery", async () => {
+    for (let i = 0; i < 20; i++) {
+      router.route({ source: "x", dest: "ag", topic: "t", payload: JSON.stringify({ n: i }) });
+    }
+    store.upsertAgent({ id: "peer", display_name: "peer", pubkey: "pk-peer", permanent: true });
+    const sleeper = controlledSleep();
+    router = new Router(store, emitter, log, undefined, {
+      pageSize: 5,
+      backoffBaseMs: 1_000,
+      backoffMaxMs: 8_000,
+      quarantineFailures: 2,
+      sleep: sleeper.sleep,
+    });
+
+    const sess = store.createSession("ag");
+    const first = throwingWriter(3);
+    emitter.register("ag", sess.id, first.writer);
+    await router.replay("ag", sess.id);
+    expect(first.seqs()).toEqual([1, 2, 3]);
+    expect(router.getReplayStatus(sess.id)?.failures).toBe(1);
+
+    const second = throwingWriter(3);
+    emitter.register("ag", sess.id, second.writer);
+    const replayP = router.replay("ag", sess.id);
+    expect(sleeper.delays.some((delay) => delay > 0)).toBe(true);
+
+    const peerSess = store.createSession("peer");
+    const peerWriter = mockWriter();
+    emitter.register("peer", peerSess.id, peerWriter.writer);
+    router.route({ source: "x", dest: "peer", topic: "t", payload: "{}" });
+    expect(peerWriter.seqs()).toEqual([21]);
+
+    sleeper.resolveNext();
+    await replayP;
+    expect(router.getReplayStatus(sess.id)).toMatchObject({ failures: 2, quarantined: true });
+    expect(store.getSession(sess.id)?.last_ack_seq).toBe(0);
   });
 });
 

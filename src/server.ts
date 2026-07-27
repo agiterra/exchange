@@ -800,13 +800,23 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
           }, 30_000);
 
           const session = store.getSession(sessionId!);
-          const replaySeq = session?.last_ack_seq ?? 0;
-          log.info({ event: "sse_replay", agentId, sessionId, fromSeq: replaySeq }, "SSE replaying backlog");
-          // Fire-and-forget: replay is chunked/async so it doesn't block the
+          const lastEventIdHeader = c.req.header("last-event-id");
+          const parsedLastEventId = lastEventIdHeader ? Number.parseInt(lastEventIdHeader, 10) : NaN;
+          const lastEventId = Number.isFinite(parsedLastEventId) ? parsedLastEventId : null;
+          const replaySeq = Math.max(session?.last_ack_seq ?? 0, lastEventId ?? 0);
+          log.info({
+            event: "sse_replay",
+            agentId,
+            sessionId,
+            fromSeq: replaySeq,
+            lastAckSeq: session?.last_ack_seq ?? 0,
+            lastEventId,
+          }, "SSE replaying backlog");
+          // Fire-and-forget: replay is paged/async so it doesn't block the
           // stream handler (or the event loop). Live emits to this session
           // buffer until the backlog drains. beginReplay runs synchronously
           // here, before the first live message can arrive.
-          router.replay(agentId, sessionId!).catch((e) => {
+          router.replay(agentId, sessionId!, { lastEventId }).catch((e) => {
             log.error({ event: "sse_replay_error", agentId, sessionId, err: String(e) }, "SSE backlog replay failed");
           });
 

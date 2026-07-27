@@ -31,6 +31,32 @@ export type DeliveryResult = {
 
 export type RouteListener = (msg: Message, deliveries: DeliveryResult[]) => void;
 
+export type ReplayOptions = {
+  /**
+   * SSE transport resume cursor. This is deliberately not persisted as an ack:
+   * a client may report the last event it received, so replay can resume after
+   * that frame without advancing the broker's durable client-ack cursor.
+   */
+  lastEventId?: number | null;
+};
+
+export type RouterReplayConfig = {
+  pageSize?: number;
+  backoffBaseMs?: number;
+  backoffMaxMs?: number;
+  quarantineFailures?: number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+export type ReplaySessionStatus = {
+  failures: number;
+  lastAckSeq: number;
+  lastStartSeq: number;
+  lastDeliveredSeq: number;
+  nextReplayAt: number;
+  quarantined: boolean;
+};
+
 /** Input envelope for route()/routeAsync(). */
 export type RouteInput = {
   source: string;
@@ -61,10 +87,17 @@ export type RouteInput = {
 };
 
 export class Router {
+  private static readonly DEFAULT_REPLAY_PAGE_SIZE = 100;
+  private static readonly DEFAULT_REPLAY_BACKOFF_BASE_MS = 250;
+  private static readonly DEFAULT_REPLAY_BACKOFF_MAX_MS = 30_000;
+  private static readonly DEFAULT_REPLAY_QUARANTINE_FAILURES = 5;
+
   private routeListeners = new Set<RouteListener>();
   private log: Logger;
   private federation: RouterFederation | undefined;
   private discoveryCache = new DiscoveryCache(60_000);
+  private replayStates = new Map<string, ReplaySessionStatus>();
+  private replayConfig: Required<RouterReplayConfig>;
   /**
    * Reserved identities of config-declared server plugins (loadServerPlugins).
    * Delivered/replayed frames to THESE recipients — and only these — carry
@@ -77,9 +110,17 @@ export class Router {
     private emitter: MessageEmitter,
     log: Logger,
     federation?: RouterFederation,
+    replayConfig: RouterReplayConfig = {},
   ) {
     this.log = log.child({ component: "router" });
     this.federation = federation;
+    this.replayConfig = {
+      pageSize: replayConfig.pageSize ?? Router.DEFAULT_REPLAY_PAGE_SIZE,
+      backoffBaseMs: replayConfig.backoffBaseMs ?? Router.DEFAULT_REPLAY_BACKOFF_BASE_MS,
+      backoffMaxMs: replayConfig.backoffMaxMs ?? Router.DEFAULT_REPLAY_BACKOFF_MAX_MS,
+      quarantineFailures: replayConfig.quarantineFailures ?? Router.DEFAULT_REPLAY_QUARANTINE_FAILURES,
+      sleep: replayConfig.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    };
   }
 
   /** Used by /peers/refresh handler to drop stale peer→agent cache entries. */
@@ -103,6 +144,11 @@ export class Router {
   onRoute(listener: RouteListener): () => void {
     this.routeListeners.add(listener);
     return () => this.routeListeners.delete(listener);
+  }
+
+  getReplayStatus(sessionId: string): ReplaySessionStatus | undefined {
+    const state = this.replayStates.get(sessionId);
+    return state ? { ...state } : undefined;
   }
 
   /**
@@ -259,9 +305,9 @@ export class Router {
 
   /**
    * Replay backlog for a session, then resume live delivery. Runs async and
-   * CHUNKED: emits the backlog in batches, yielding to the event loop between
-   * them, so a large backlog (or many simultaneous reconnects) can't starve it —
-   * the synchronous-replay burst was the load that turned an SSE flap into a
+   * PAGED: emits one bounded page at a time, yielding to the event loop between
+   * pages, so a large backlog (or many simultaneous reconnects) can't starve it
+   * — the synchronous-replay burst was the load that turned an SSE flap into a
    * gateway hang.
    *
    * Live messages that arrive mid-replay are buffered by the emitter
@@ -271,38 +317,117 @@ export class Router {
    * skipped backlog on a mid-replay disconnect). Targets the specific session,
    * not every session of the agent.
    */
-  async replay(agentId: string, sessionId: string): Promise<void> {
+  async replay(agentId: string, sessionId: string, options: ReplayOptions = {}): Promise<void> {
     const session = this.store.getSession(sessionId);
     if (!session) return;
 
+    const startSeq = this.replayStartSeq(session.last_ack_seq, options.lastEventId);
     this.emitter.beginReplay(agentId, sessionId);
+    let cursor = startSeq;
     try {
-      const messages = this.store.getMessagesForAgent(agentId, session.last_ack_seq, 1000);
-      const CHUNK = 50;
-      for (let i = 0; i < messages.length; i++) {
-        const msg = messages[i];
-        const data = JSON.stringify({
-          seq: msg.seq,
-          source: msg.source,
-          topic: msg.topic,
-          payload: JSON.parse(msg.payload),
-          dest: msg.dest,
-          created_at: msg.created_at,
-          ...(msg.source_pubkey && this.serverPluginIds.has(agentId)
-            ? { source_pubkey: msg.source_pubkey }
-            : {}),
-        });
-        if (!this.emitter.replayWrite(agentId, sessionId, data, msg.seq)) {
-          return; // session gone mid-replay — endReplay() (finally) no-ops
+      await this.applyReplayBackoff(agentId, sessionId, session.last_ack_seq);
+
+      while (true) {
+        const messages = this.store.getMessagesForAgent(agentId, cursor, this.replayConfig.pageSize);
+        if (messages.length === 0) {
+          this.replayStates.delete(sessionId);
+          return;
         }
-        if ((i + 1) % CHUNK === 0) {
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+        for (const msg of messages) {
+          const data = JSON.stringify({
+            seq: msg.seq,
+            source: msg.source,
+            topic: msg.topic,
+            payload: JSON.parse(msg.payload),
+            dest: msg.dest,
+            created_at: msg.created_at,
+            ...(msg.source_pubkey && this.serverPluginIds.has(agentId)
+              ? { source_pubkey: msg.source_pubkey }
+              : {}),
+          });
+          if (!this.emitter.replayWrite(agentId, sessionId, data, msg.seq)) {
+            this.recordReplayFailure(agentId, sessionId, session.last_ack_seq, startSeq, cursor);
+            return; // session gone mid-replay — endReplay() (finally) no-ops
+          }
+          cursor = msg.seq;
         }
+
+        await this.replayConfig.sleep(0);
       }
     } finally {
       // Always flush buffered live frames and resume direct delivery, even if a
       // write failed or the backlog was empty.
       this.emitter.endReplay(agentId, sessionId);
     }
+  }
+
+  private replayStartSeq(lastAckSeq: number, lastEventId: number | null | undefined): number {
+    if (!Number.isFinite(lastEventId)) return lastAckSeq;
+    const resumeSeq = Math.floor(Number(lastEventId));
+    return resumeSeq > lastAckSeq ? resumeSeq : lastAckSeq;
+  }
+
+  private async applyReplayBackoff(agentId: string, sessionId: string, lastAckSeq: number): Promise<void> {
+    const state = this.replayStates.get(sessionId);
+    if (!state) return;
+
+    if (lastAckSeq > state.lastAckSeq) {
+      this.replayStates.delete(sessionId);
+      return;
+    }
+
+    const delayMs = state.nextReplayAt - Date.now();
+    if (delayMs <= 0) return;
+
+    this.log.warn({
+      event: "sse_replay_backoff",
+      agentId,
+      sessionId,
+      failures: state.failures,
+      delayMs,
+      quarantined: state.quarantined,
+      lastAckSeq,
+      lastDeliveredSeq: state.lastDeliveredSeq,
+    }, "SSE replay delayed for non-advancing ack session");
+    await this.replayConfig.sleep(delayMs);
+  }
+
+  private recordReplayFailure(
+    agentId: string,
+    sessionId: string,
+    lastAckSeq: number,
+    lastStartSeq: number,
+    lastDeliveredSeq: number,
+  ): void {
+    const prev = this.replayStates.get(sessionId);
+    const failures = prev && prev.lastAckSeq === lastAckSeq ? prev.failures + 1 : 1;
+    const delay = Math.min(
+      this.replayConfig.backoffBaseMs * (2 ** Math.max(0, failures - 1)),
+      this.replayConfig.backoffMaxMs,
+    );
+    const quarantined = failures >= this.replayConfig.quarantineFailures;
+    const state: ReplaySessionStatus = {
+      failures,
+      lastAckSeq,
+      lastStartSeq,
+      lastDeliveredSeq,
+      nextReplayAt: Date.now() + delay,
+      quarantined,
+    };
+    this.replayStates.set(sessionId, state);
+
+    this.log.warn({
+      event: quarantined ? "sse_replay_quarantine" : "sse_replay_failed",
+      agentId,
+      sessionId,
+      failures,
+      delayMs: delay,
+      lastAckSeq,
+      lastStartSeq,
+      lastDeliveredSeq,
+    }, quarantined
+      ? "SSE replay quarantined for repeated non-advancing ack"
+      : "SSE replay failed before backlog drained");
   }
 }
