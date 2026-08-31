@@ -419,6 +419,49 @@ describe("POST /agents/register — only PERMANENT agents (personai) may sponsor
     const res = await signedRegister(priv, "director", { id: "spawnee2", display_name: "spawnee2", pubkey: "pk-spawnee2" });
     expect(res.ok).toBe(true);
   });
+
+  test("reaped permanent + force_rotate + personai sponsor is accepted (biscotti class)", async () => {
+    const priv = await makeSponsor("director", true);
+    store.upsertAgent({ id: "biscotti", display_name: "Biscotti", pubkey: "pk-old", permanent: true });
+    store.softReapAgent("biscotti");
+    expect(store.getAgent("biscotti")?.reaped_at).not.toBeNull();
+    const res = await signedRegister(priv, "director", {
+      id: "biscotti",
+      display_name: "Biscotti",
+      pubkey: "pk-new",
+      force_rotate: true,
+    });
+    expect(res.status).toBe(201);
+    const row = store.getAgent("biscotti");
+    expect(row?.pubkey).toBe("pk-new");
+    expect(row?.reaped_at).toBeNull();
+  });
+
+  test("reaped permanent + new pubkey without force_rotate is 409", async () => {
+    const priv = await makeSponsor("director", true);
+    store.upsertAgent({ id: "gaia", display_name: "Gaia", pubkey: "pk-old", permanent: true });
+    store.softReapAgent("gaia");
+    const res = await signedRegister(priv, "director", {
+      id: "gaia",
+      display_name: "Gaia",
+      pubkey: "pk-new",
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code?: string }).code).toBe("agent_exists_pubkey_mismatch");
+  });
+
+  test("LIVE permanent + force_rotate + sponsor JWT is 403 issuer mismatch (palmier)", async () => {
+    const priv = await makeSponsor("director", true);
+    store.upsertAgent({ id: "vacherin", display_name: "Vacherin", pubkey: "pk-live", permanent: true });
+    const res = await signedRegister(priv, "director", {
+      id: "vacherin",
+      display_name: "Vacherin",
+      pubkey: "pk-rotated",
+      force_rotate: true,
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error?: string }).error).toBe("JWT issuer does not match agent");
+  });
 });
 
 describe("Change A — POST /peers/forward fails CLOSED for server-plugin dests (§3.4 v1)", () => {

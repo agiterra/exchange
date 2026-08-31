@@ -185,3 +185,23 @@ describe("SSE replay-on-connect — purged-sessions path", () => {
     expect(backlog.map((m) => m.seq)).toEqual([bseq1, bseq2]);
   });
 });
+
+describe("heartbeat restores stale → connected", () => {
+  test("heartbeat un-stales a stale session", () => {
+    store.upsertAgent({ id: "hb-stale", display_name: "hb-stale", pubkey: "pk-hb-stale", permanent: true });
+    const s = store.createSession("hb-stale", "claude-code");
+    (store as any).db.prepare("UPDATE agent_sessions SET status = 'stale' WHERE id = ?").run(s.id);
+    expect(store.getActiveSessions("hb-stale")).toHaveLength(0);
+    store.heartbeatSession(s.id);
+    expect(store.getActiveSessions("hb-stale")).toHaveLength(1);
+    expect(store.getActiveSessions("hb-stale")[0].status).toBe("connected");
+  });
+
+  test("heartbeat does not resurrect a disconnected session", () => {
+    store.upsertAgent({ id: "hb-disc", display_name: "hb-disc", pubkey: "pk-hb-disc", permanent: true });
+    const s = store.createSession("hb-disc", "claude-code");
+    store.disconnectSession(s.id);
+    store.heartbeatSession(s.id);
+    expect(store.getActiveSessions("hb-disc")).toHaveLength(0);
+  });
+});

@@ -834,9 +834,12 @@ export class Store {
   }
 
   heartbeatSession(sessionId: string): void {
+    // A missed 20s tick flips connected→stale. Heartbeat is the reverse
+    // edge: restore connected. Do NOT resurrect disconnected (intentional close).
+    const now = Date.now();
     this.db.prepare(
-      "UPDATE agent_sessions SET last_heartbeat = ?, updated_at = ? WHERE id = ?"
-    ).run(Date.now(), Date.now(), sessionId);
+      "UPDATE agent_sessions SET last_heartbeat = ?, updated_at = ?, status = 'connected', disconnected_at = NULL WHERE id = ? AND status IN ('connected', 'stale')"
+    ).run(now, now, sessionId);
   }
 
   /** True if agent has any connected session (SSE socket open). */

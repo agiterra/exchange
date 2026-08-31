@@ -539,10 +539,23 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
 
     let authPath: string;
     if (existing && existing.permanent) {
-      authPath = isGreyed ? "permanent-readmission" : "permanent-reregister";
-      // Permanent agent (alive or greyed) — must prove identity with own key
-      const err = await requireAgent(c, id);
-      if (err) return err;
+      if (isGreyed && force_rotate) {
+        // Reaped permanent whose process (and key) is gone. `permanent` is a
+        // one-way latch (upsert never clears it), so a long-reaped engineer
+        // like biscotti stays permanent=1. requireAgent(id) then 403s
+        // "JWT issuer does not match agent" because the sponsor JWT iss is
+        // brioche, not the dead id. force_rotate + greyed → permanent sponsor
+        // may mint a new key. LIVE permanents still require their own JWT
+        // (palmier: rotating a live agent from a sponsor locks it out).
+        authPath = "permanent-readmission-rotate";
+        const err = await requirePermanentAgentOrOperator(c);
+        if (err) return err;
+      } else {
+        authPath = isGreyed ? "permanent-readmission" : "permanent-reregister";
+        // Permanent agent (alive, or greyed without force_rotate) — own key
+        const err = await requireAgent(c, id);
+        if (err) return err;
+      }
     } else if (existing && !existing.permanent && !isGreyed) {
       authPath = "ephemeral-reregister";
       // Ephemeral agent re-registering while still alive — allow the agent
