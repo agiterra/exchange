@@ -897,13 +897,24 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       const res = await fetch('/agents/' + encodeURIComponent(agentId) + '/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg }),
+        body: JSON.stringify({ message: msg, text: msg }),
       });
 
       const data = await res.json();
       if (!res.ok) {
         // Intentionally using alert here — operator action, not automated
-        window.alert('Send failed: ' + (data.error || res.status));
+        window.alert('Send failed: ' + (data.error || res.status) + (data.detail ? ' — ' + data.detail : ''));
+        return;
+      }
+      const planCell = document.querySelector('[data-plan-for="' + agentId + '"]');
+      if (planCell) {
+        const note = document.createElement('div');
+        note.style.color = '#4ade80';
+        note.style.fontSize = '11px';
+        const st = ((data.delivered_to || [])[0] || {}).status || 'stored';
+        note.textContent = 'msg seq ' + data.seq + ' (' + st + ')';
+        planCell.appendChild(note);
+        setTimeout(function() { note.remove(); }, 5000);
       }
     }
 

@@ -21,11 +21,8 @@
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
-import { watchFile, existsSync, unlinkSync } from "fs";
+import { watchFile } from "fs";
 import { join } from "path";
-import { execFileSync } from "child_process";
-import { tmpdir } from "os";
-import Database from "bun:sqlite";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Context } from "hono";
@@ -44,6 +41,7 @@ import { verifyRegistrationResponse, verifyAuthenticationResponse } from "@simpl
 import type { Logger } from "pino";
 import { evaluateFilter, evaluateExpression, validateFilter } from "./filter.js";
 import { renderDashboard as _initialRenderDashboard, renderLogin } from "./dashboard.js";
+import { peekAgentScreen, type PeekAgent, type PeekResult } from "./peek-screen.js";
 import { dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -91,6 +89,8 @@ type ServerDeps = {
    *  Used by index.ts to purge session-scoped webhooks immediately rather than
    *  waiting for the reconciler. */
   onSessionEnd?: (sessionId: string, agentId: string) => void;
+  /** Operator peek. Injected in tests so bun test never sudo-hardcopies a live screen. */
+  peekScreen?: (agent: PeekAgent) => PeekResult;
 };
 
 // --- JWT verification ---
@@ -161,7 +161,7 @@ export async function runCleanup(
   await fn(ctx.meta, ctx.secrets, fetch);
 }
 
-export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd, serverPlugins = [] }: ServerDeps) {
+export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd, serverPlugins = [], peekScreen = peekAgentScreen }: ServerDeps) {
   _serverLog = log;
   const serverPluginByAgentId = new Map(serverPlugins.map((p) => [p.agentId, p]));
   const app = new Hono();
@@ -898,36 +898,25 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     if (err) return err;
 
     const agentId = c.req.param("id");
-    const crewDb = join(process.env.HOME ?? "/tmp", ".wire", "crews.db");
-    if (!existsSync(crewDb)) {
-      return c.json({ error: "crew database not found at " + crewDb }, 500);
+    const agent = store.getAgent(agentId);
+    if (!agent) {
+      return c.json({ error: `agent '${agentId}' not registered` }, 404);
     }
 
-    const db = new Database(crewDb, { readonly: true });
-    try {
-      const row = db.query("SELECT screen_name FROM agents WHERE id = ?").get(agentId) as { screen_name: string } | null;
-      if (!row) {
-        return c.json({ error: `agent '${agentId}' not found in crew database` }, 404);
-      }
-
-      const safeAgentId = agentId.replace(/[^a-zA-Z0-9_.-]/g, "_");
-      const tmpFile = join(tmpdir(), `wire-peek-${safeAgentId}-${Date.now()}.txt`);
-      try {
-        execFileSync("/opt/homebrew/bin/screen", ["-S", row.screen_name, "-X", "hardcopy", tmpFile], { timeout: 5000 });
-        const output = Bun.file(tmpFile);
-        const text = await output.text();
-        unlinkSync(tmpFile);
-        return c.json({ agent_id: agentId, screen_name: row.screen_name, output: text.trimEnd() });
-      } catch (e: any) {
-        return c.json({
-          error: `failed to read screen for '${agentId}' (screen: ${row.screen_name})`,
-          detail: e.message,
-          stderr: e.stderr?.toString(),
-        }, 500);
-      }
-    } finally {
-      db.close();
+    const result = peekScreen({
+      id: agent.id,
+      run_as_uid: agent.run_as_uid,
+      screen_name: agent.screen_name,
+    });
+    if (!result.ok) {
+      return c.json({ error: result.error, detail: result.detail }, result.status as 400 | 404 | 500);
     }
+    return c.json({
+      agent_id: result.agent_id,
+      screen_name: result.screen_name,
+      run_as_uid: result.run_as_uid,
+      output: result.output,
+    });
   });
 
   // --- Agent Send Message (operator sends IPC to agent) ---
@@ -951,9 +940,12 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     const operatorId = getOperatorFromSession(c.req.header("cookie"), store);
     const operator = operatorId ? store.getOperator(operatorId) : null;
     const operatorName = operator?.display_name ?? "operator";
+    // `text` is the field grok-wire / CC channel unwrap read; `message` kept for
+    // older injectors. Topic `ipc` is on the grok-personai enrich allowlist.
     const payload = JSON.stringify({
       type: "operator-message",
       from: operatorName,
+      text,
       message: text,
     });
 

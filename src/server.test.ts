@@ -169,6 +169,74 @@ describe("GET /peers/agents/:id — claims DELIVERABILITY (live session), not me
   });
 });
 
+describe("GET /agents/:id/peek — Wire self-report, not crews.db", () => {
+  test("404 when the agent is not registered", async () => {
+    const res = await fetch(`${baseUrl}/agents/nobody/peek?token=${TOKEN}`);
+    expect(res.status).toBe(404);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("not registered");
+  });
+
+  test("401 without operator auth", async () => {
+    const res = await fetch(`${baseUrl}/agents/fondant/peek`);
+    expect(res.status).toBe(401);
+  });
+
+  test("uses store self-report and injected peekScreen (never crews.db)", async () => {
+    store.upsertAgent({
+      id: "peekme",
+      display_name: "peekme",
+      pubkey: "pk-peekme",
+      permanent: true,
+      run_as_uid: "fondant",
+      screen_name: "fondant",
+    });
+    server.stop(true);
+    const emitter = new MessageEmitter();
+    const router = new Router(store, emitter, log);
+    const heartbeats = new HeartbeatScheduler(store, router, log);
+    const seen: unknown[] = [];
+    server = createServer({
+      port: 0, store, router, emitter, log, heartbeats,
+      peekScreen: (agent) => {
+        seen.push(agent);
+        return { ok: true, agent_id: agent.id, screen_name: agent.screen_name || agent.id, run_as_uid: agent.run_as_uid || agent.id, output: "SCREEN DUMP" };
+      },
+    });
+    baseUrl = `http://localhost:${server.port}`;
+    const res = await fetch(`${baseUrl}/agents/peekme/peek?token=${TOKEN}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { output: string; run_as_uid: string; screen_name: string };
+    expect(body.output).toBe("SCREEN DUMP");
+    expect(body.run_as_uid).toBe("fondant");
+    expect(body.screen_name).toBe("fondant");
+    expect(seen).toEqual([{ id: "peekme", run_as_uid: "fondant", screen_name: "fondant" }]);
+  });
+});
+
+describe("POST /agents/:id/message — operator IPC", () => {
+  test("401 without operator auth", async () => {
+    const res = await fetch(`${baseUrl}/agents/fondant/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "hi" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("200 even with no SSE — store is the primary path; replay on reconnect", async () => {
+    const res = await fetch(`${baseUrl}/agents/fondant/message?token=${TOKEN}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "hi", text: "hi" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { seq: number; delivered_to: { status: string }[] };
+    expect(typeof body.seq).toBe("number");
+    expect(body.delivered_to[0]?.status).toBe("offline");
+  });
+});
+
 describe("POST /agents/register — click-to-attach self-report fields", () => {
   function registerAgent(body: Record<string, unknown>) {
     return fetch(`${baseUrl}/agents/register?token=${TOKEN}`, {
