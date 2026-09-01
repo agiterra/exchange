@@ -275,6 +275,21 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .json-bracket { color: #525252; }
     .json-comma { color: #525252; }
     .json-preview { color: #3f3f46; }
+    /* token strip: one cell per harness pool; red = empty or credential dead, amber = >=80% */
+    .usage-strip { display: flex; gap: 10px; margin: 0 0 16px 0; flex-wrap: wrap; }
+    .usage-cell { border: 1px solid #333; border-radius: 4px; padding: 6px 10px; min-width: 170px; background: #111118; font-size: 12px; }
+    .usage-cell .usage-label { color: #a1a1aa; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+    .usage-cell .usage-vals { color: #e5e5e5; }
+    .usage-cell .usage-vals span { margin-right: 8px; white-space: nowrap; }
+    .usage-cell .usage-note { color: #6b7280; font-size: 11px; margin-top: 2px; }
+    .usage-cell.ok { border-color: #2f4f3a; }
+    .usage-cell.amber { border-color: #b45309; background: #1f1706; }
+    .usage-cell.amber .usage-label { color: #fbbf24; }
+    .usage-cell.red { border-color: #dc2626; background: #2a0b0b; }
+    .usage-cell.red .usage-label { color: #f87171; }
+    .usage-cell.unknown { border-color: #3f3f46; }
+    .usage-cell.unknown .usage-label { color: #71717a; }
+    .usage-stale { color: #f59e0b; font-size: 11px; margin-left: 6px; }
     .stats {
       display: flex;
       gap: 32px;
@@ -366,6 +381,8 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     <div><span class="stat-value">${agents.reduce((n: number, a: any) => n + a.sessions, 0)}</span> sessions</div>
   </div>
 
+  <div id="usage-strip" class="usage-strip"><div class="usage-cell unknown"><div class="usage-label">tokens</div><div class="usage-vals">loading…</div></div></div>
+
   <h2>Agent Registry</h2>
   <table>
     <colgroup>
@@ -430,6 +447,60 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   <footer>The Wire · agiterra · port ${process.env.WIRE_PORT ?? "9800"}</footer>
 
   <script>
+    // --- Token strip (GET /usage, polled every 60s; never invents a number) ---
+    function relTime(iso) {
+      if (!iso) return '';
+      const ms = new Date(iso).getTime() - Date.now();
+      if (isNaN(ms)) return '';
+      if (ms <= 0) return 'reset due';
+      const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+      return h >= 24 ? 'resets in ' + Math.floor(h / 24) + 'd ' + (h % 24) + 'h' : 'resets in ' + h + 'h ' + m + 'm';
+    }
+    function pctNum(v) { return (v === null || v === undefined || v === '') ? null : Number(v); }
+    function stateFor(pcts, dead) {
+      if (dead) return 'red';
+      const known = pcts.filter(p => p !== null && !isNaN(p));
+      if (!known.length) return 'unknown';
+      const mx = Math.max.apply(null, known);
+      return mx >= 95 ? 'red' : (mx >= 80 ? 'amber' : 'ok');
+    }
+    function usageCell(label, state, vals, note) {
+      return '<div class="usage-cell ' + state + '"><div class="usage-label">' + esc(label) + '</div>' +
+        '<div class="usage-vals">' + vals.map(v => '<span title="' + esc(v[2] || '') + '">' + esc(v[0]) + ' ' + esc(v[1]) + '</span>').join('') + '</div>' +
+        (note ? '<div class="usage-note">' + esc(note) + '</div>' : '') + '</div>';
+    }
+    async function loadUsage() {
+      const el = document.getElementById('usage-strip');
+      if (!el) return;
+      try {
+        const res = await fetch('/usage');
+        const j = await res.json();
+        if (!j.ok) { el.innerHTML = usageCell('tokens', 'red', [['meter file', 'unreadable', '']], j.error || j.file); return; }
+        const d = j.data || {};
+        const ageMin = (Date.now() - new Date(d.as_of || j.file_mtime).getTime()) / 60000;
+        const stale = isNaN(ageMin) ? '' : (ageMin > 30 ? ' <span class="usage-stale">stale ' + Math.round(ageMin) + 'm</span>' : '');
+        const sd = d.seven_day || {}, fh = d.five_hour || {}, fw = d.fable_weekly || {};
+        const cDead = d.claude_status && d.claude_status !== 'live';
+        const cp = [pctNum(sd.used_percent), pctNum(fh.used_percent), pctNum(fw.used_percent)];
+        const fmt = p => p === null ? '—' : p + '%';
+        const claude = usageCell('Claude', stateFor(cp, cDead),
+          [['7d', fmt(cp[0]), relTime(sd.resets_at)], ['5h', fmt(cp[1]), relTime(fh.resets_at)], ['Fable', fmt(cp[2]), relTime(fw.resets_at)]],
+          cDead ? 'credential/probe: ' + d.claude_status : relTime(fh.resets_at));
+        const g = (d.grok || {}).weekly_page || {};
+        const gp = pctNum(g.used_percent);
+        const grok = usageCell('Grok', stateFor([gp], false), [['weekly', fmt(gp), relTime(g.resets_at)]],
+          gp === null ? 'no live scrape — ' + relTime(g.resets_at) : relTime(g.resets_at));
+        const x = ((d.codex || {}).primary) || {};
+        const xp = pctNum(x.used_percent);
+        const codex = usageCell('Codex', stateFor([xp], false), [['weekly', fmt(xp), relTime(x.resets_at)]], relTime(x.resets_at));
+        el.innerHTML = claude + grok + codex + '<div class="usage-cell unknown"><div class="usage-label">as of</div><div class="usage-vals">' + esc((d.as_of || '').replace('T', ' ').slice(0, 16)) + 'Z' + stale + '</div></div>';
+      } catch (e) {
+        el.innerHTML = usageCell('tokens', 'red', [['/usage', 'failed', '']], String(e));
+      }
+    }
+    loadUsage();
+    setInterval(loadUsage, 60000);
+
     // --- Live SSE updates ---
     const evtSource = new EventSource('/dashboard/stream');
     evtSource.addEventListener('refresh', () => window.location.reload());

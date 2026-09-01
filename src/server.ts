@@ -21,7 +21,7 @@
  *   GET  /                               — dashboard (WebAuthn protected, future)
  */
 
-import { watchFile } from "fs";
+import { watchFile, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -1471,6 +1471,26 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   });
 
   // --- Recent messages endpoint (for dashboard backfill) ---
+
+  // --- Usage meters for the dashboard token strip (2026-09-01, Tim: "warning flags when
+  // we're out of tokens ... for all harnesses/models"). Source of truth is the file the
+  // fleet sweep already writes for Brioche's pacing; the dashboard must never invent a number,
+  // so a missing file or field is reported as such, not as 0.
+  app.get("/usage", (c) => {
+    if (!isOperator(c)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const file = process.env.WIRE_USAGE_FILE ?? "/tmp/sweep-usage.json";
+    try {
+      const raw = readFileSync(file, "utf8");
+      const data = JSON.parse(raw);
+      const mtime = statSync(file).mtimeMs;
+      return c.json({ ok: true, file, file_mtime: new Date(mtime).toISOString(), data });
+    } catch (e: any) {
+      log.warn({ event: "usage_read_fail", file, err: String(e?.message ?? e) }, "usage file unreadable");
+      return c.json({ ok: false, file, error: String(e?.message ?? e) }, 200);
+    }
+  });
 
   app.get("/messages/recent", (c) => {
     if (!isOperator(c)) {
