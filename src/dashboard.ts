@@ -493,7 +493,16 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         const x = ((d.codex || {}).primary) || {};
         const xp = pctNum(x.used_percent);
         const codex = usageCell('Codex', stateFor([xp], false), [['weekly', fmt(xp), relTime(x.resets_at)]], relTime(x.resets_at));
-        el.innerHTML = claude + grok + codex + '<div class="usage-cell unknown"><div class="usage-label">as of</div><div class="usage-vals">' + esc((d.as_of || '').replace('T', ' ').slice(0, 16)) + 'Z' + stale + '</div></div>';
+        const h = j.host || null;
+        let hostCell = usageCell('Host', 'unknown', [['mem', '—', ''], ['swap', '—', ''], ['disk', '—', '']], 'no host meter');
+        if (h && h.mem) {
+          const swp = pctNum((h.swap || {}).used_pct), mf = pctNum((h.mem || {}).free_pct), dfree = (h.disk || {}).free_gb;
+          const hstate = (swp !== null && swp >= 50) || (mf !== null && mf < 15) || (dfree !== undefined && dfree < 20) ? 'red' : ((swp !== null && swp >= 25) || (mf !== null && mf < 30) || (dfree !== undefined && dfree < 40) ? 'amber' : 'ok');
+          hostCell = usageCell('Host', hstate,
+            [['mem used', fmt(pctNum((h.mem || {}).used_pct)), (h.mem || {}).total_gb + ' GB'], ['swap', fmt(swp), ((h.swap || {}).used_mb || 0) + ' / ' + ((h.swap || {}).total_mb || 0) + ' MB'], ['disk free', (dfree === undefined ? '—' : dfree + ' GB'), ((h.disk || {}).used_pct || '') + '% used']],
+            (h.flags && h.flags.length) ? h.flags[0] : 'as of ' + String(h.as_of || '').slice(11, 16) + 'Z');
+        }
+        el.innerHTML = claude + grok + codex + hostCell + '<div class="usage-cell unknown"><div class="usage-label">as of</div><div class="usage-vals">' + esc((d.as_of || '').replace('T', ' ').slice(0, 16)) + 'Z' + stale + '</div></div>';
       } catch (e) {
         el.innerHTML = usageCell('tokens', 'red', [['/usage', 'failed', '']], String(e));
       }

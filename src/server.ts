@@ -1485,7 +1485,10 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       const raw = readFileSync(file, "utf8");
       const data = JSON.parse(raw);
       const mtime = statSync(file).mtimeMs;
-      return c.json({ ok: true, file, file_mtime: new Date(mtime).toISOString(), data });
+      // host memory/swap/disk written every 60s by host-usage.sh (Tim 2026-09-01); absent => null
+      let host: unknown = null;
+      try { host = JSON.parse(readFileSync(process.env.WIRE_HOST_USAGE_FILE ?? "/tmp/host-usage.json", "utf8")); } catch { host = null; }
+      return c.json({ ok: true, file, file_mtime: new Date(mtime).toISOString(), data, host });
     } catch (e: any) {
       log.warn({ event: "usage_read_fail", file, err: String(e?.message ?? e) }, "usage file unreadable");
       return c.json({ ok: false, file, error: String(e?.message ?? e) }, 200);
