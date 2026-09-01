@@ -316,6 +316,11 @@ export class Store {
     const path = dbPath ?? process.env.WIRE_DB ?? `${process.env.HOME}/.wire/wire.db`;
     this.db = new Database(path);
     this.db.exec("PRAGMA journal_mode=WAL;");
+    // 2026-09-01: without a busy timeout ANY external writer holding the lock for an instant
+    // (the retention prune, a sqlite3 shell) surfaces as an uncaught SQLiteError "database is
+    // locked" and kills the gateway (launchd runs 4->6 during the first prune). 5s matches
+    // wire-prune.sh's own timeout so the two back off rather than collide.
+    this.db.exec("PRAGMA busy_timeout=5000;");
     this.db.exec("PRAGMA foreign_keys=ON;");
     this.db.exec(SCHEMA);
     this.migrate();
