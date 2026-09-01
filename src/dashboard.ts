@@ -896,21 +896,19 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       });
 
       const data = await res.json();
+      const dock = document.getElementById('peek-dock');
+      const note = document.createElement('div');
+      note.className = 'peek-output';
       if (!res.ok) {
-        // Intentionally using alert here — operator action, not automated
-        window.alert('Send failed: ' + (data.error || res.status) + (data.detail ? ' — ' + data.detail : ''));
-        return;
-      }
-      const planCell = document.querySelector('[data-plan-for="' + agentId + '"]');
-      if (planCell) {
-        const note = document.createElement('div');
-        note.style.color = '#4ade80';
-        note.style.fontSize = '11px';
+        note.style.color = '#f87171';
+        note.textContent = 'msg to ' + agentId + ' failed: ' + (data.error || res.status) + (data.detail ? ' — ' + data.detail : '');
+      } else {
         const st = ((data.delivered_to || [])[0] || {}).status || 'stored';
-        note.textContent = 'msg seq ' + data.seq + ' (' + st + ')';
-        planCell.appendChild(note);
-        setTimeout(function() { note.remove(); }, 5000);
+        note.innerHTML = '<div class="peek-header">msg ' + esc(agentId) + ' seq ' + esc(String(data.seq)) + ' (' + esc(st) + ') — click to dismiss</div>';
       }
+      note.onclick = function() { note.remove(); };
+      if (dock) dock.appendChild(note);
+      else window.alert(note.textContent);
     }
 
     async function registerAgent() {
