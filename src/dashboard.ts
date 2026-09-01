@@ -122,7 +122,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .agent-actions button:hover { background: #2a2a3e; color: #e5e5e5; border-color: #555; }
     .agent-actions .row-btn { display: inline-block; padding: 2px 8px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; cursor: pointer; font-family: inherit; text-decoration: none; line-height: inherit; }
     .agent-actions .row-btn:hover { background: #2a2a3e; color: #e5e5e5; border-color: #555; }
-    .peek-output { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-top: 4px; white-space: pre-wrap; font-size: 11px; color: #a1a1aa; max-height: 400px; overflow-y: auto; }
+    .peek-output { background: #0a0a0a; border: 1px solid #333; border-radius: 4px; padding: 12px; margin-top: 4px; white-space: pre-wrap; font-size: 11px; color: #a1a1aa; max-height: 70vh; overflow-y: auto; }
     .peek-output .peek-header { color: #fbbf24; margin-bottom: 8px; font-weight: bold; }
     .agent-plan table { border-collapse: collapse; margin: 4px 0; width: auto; }
     .agent-plan th, .agent-plan td { border: 1px solid #2a2a2a; padding: 3px 8px; text-align: left; white-space: normal; overflow: visible; }
@@ -392,6 +392,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       ${agentRows}
     </tbody>
   </table>
+  <div id="peek-dock"></div>
 
   <div class="form-section">
     <h2>Wallets</h2>
@@ -861,33 +862,27 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     }
 
 
+    // Peek lives in #peek-dock, outside the agent table. SSE rebuilds tbody
+    // every 3s; a row inside it vanished. Click peek again to close.
     async function peek(agentId) {
-      // Remove any existing peek output
       const existing = document.getElementById('peek-' + agentId);
       if (existing) { existing.remove(); return; }
 
       const res = await fetch('/agents/' + encodeURIComponent(agentId) + '/peek');
       const data = await res.json();
-
-      // Find the plan row for this agent and insert peek output after it
-      const planCell = document.querySelector('[data-plan-for="' + agentId + '"]');
-      if (!planCell) return;
-
-      const row = document.createElement('tr');
-      row.id = 'peek-' + agentId;
-      const cell = document.createElement('td');
-      cell.colSpan = 7;
-      cell.className = 'peek-output';
-
+      const dock = document.getElementById('peek-dock');
+      if (!dock) return;
+      const panel = document.createElement('div');
+      panel.id = 'peek-' + agentId;
+      panel.className = 'peek-output';
       if (res.ok) {
-        cell.innerHTML = '<div class="peek-header">' + esc(agentId) + ' screen output</div>' + esc(data.output || '(empty)');
+        panel.innerHTML = '<div class="peek-header">' + esc(agentId) + ' screen output — click peek again to close</div>' + esc(data.output || '(empty)');
       } else {
-        cell.style.color = '#f87171';
-        cell.textContent = 'peek failed: ' + (data.error || res.status) + (data.detail ? ' — ' + data.detail : '');
+        panel.style.color = '#f87171';
+        panel.textContent = 'peek failed: ' + (data.error || res.status) + (data.detail ? ' — ' + data.detail : '');
       }
-
-      row.appendChild(cell);
-      planCell.closest('tr').insertAdjacentElement('afterend', row);
+      dock.appendChild(panel);
+      panel.scrollIntoView({ block: 'nearest' });
     }
 
     async function promptSend(agentId) {
