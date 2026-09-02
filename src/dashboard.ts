@@ -3,6 +3,16 @@
  * Passkey auth on a monospace dark-mode agent registry — peak infrastructure.
  */
 
+// Persona rows get Restart / Run-as / credential status (2026-09-02). Same markup on the server
+// render and the SSE re-render; the JS binds by data-* attributes.
+const PERSONA_PRESETS = [["claude-code", "claude-fable-5-1", "Claude Fable 5.1"], ["grok", "grok-4.6", "Grok 4.6"], ["codex", "gpt-5.6-sol", "Codex Sol"]];
+function personaControls(id: string): string {
+  const opts = PERSONA_PRESETS.map(([h, m, label]) => `<option value="${h} ${m}">${label}</option>`).join("");
+  return `<span class="persona-status" data-pstatus="${id}" title="harness · credential">…</span>` +
+    `<button data-restart="${id}" title="Quit the persona screen; launchd relaunches it on its current harness (refused if the credential is dead)">restart</button>` +
+    `<select data-runas="${id}" title="Switch harness/model and restart"><option value="">run as…</option>${opts}</select>`;
+}
+
 export function renderDashboard(agents: any[], operatorName: string): string {
   const agentRows = agents.map((a: any) => {
     const status = a.online ? "●" : "○";
@@ -24,6 +34,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
           <button data-peek="${esc(a.id)}" title="Read agent's screen output">peek</button>
           <button data-msg="${esc(a.id)}" title="Send IPC message to agent">msg</button>
           <a class="row-btn" href="${esc(attachHref(a))}" title="Attach this agent's screen in a new iTerm2 tab">📺 attach</a>
+          ${a.permanent ? personaControls(a.id) : ""}
         </td>
       </tr>
       <tr><td colspan="7" class="agent-plan" data-plan-for="${esc(a.id)}">${a.plan ? esc(a.plan) : ""}</td></tr>`;
@@ -290,6 +301,10 @@ export function renderDashboard(agents: any[], operatorName: string): string {
     .usage-cell.unknown { border-color: #3f3f46; }
     .usage-cell.unknown .usage-label { color: #71717a; }
     .usage-stale { color: #f59e0b; font-size: 11px; margin-left: 6px; }
+    .persona-status { font-size: 11px; margin: 0 6px; color: #a1a1aa; }
+    .persona-status .pst-ok { color: #4ade80; }
+    .persona-status .pst-red { color: #f87171; font-weight: bold; }
+    .agent-actions select { padding: 2px 4px; font-size: 11px; background: #1a1a2e; color: #a1a1aa; border: 1px solid #333; border-radius: 3px; font-family: inherit; }
     .stats {
       display: flex;
       gap: 32px;
@@ -447,6 +462,59 @@ export function renderDashboard(agents: any[], operatorName: string): string {
   <footer>The Wire · agiterra · port ${process.env.WIRE_PORT ?? "9800"}</footer>
 
   <script>
+    // --- Persona Restart / Run-as / credential status (POST /agents/:id/persona-action) ---
+    const PERSONA_PRESETS_JS = [['claude-code','claude-fable-5-1','Claude Fable 5.1'],['grok','grok-4.6','Grok 4.6'],['codex','gpt-5.6-sol','Codex Sol']];
+    function personaControlsJs(id) {
+      const opts = PERSONA_PRESETS_JS.map(p => '<option value="' + p[0] + ' ' + p[1] + '">' + p[2] + '</option>').join('');
+      const st = personaStatusCache[id] || '…';
+      return '<span class="persona-status" data-pstatus="' + esc(id) + '" title="harness · credential">' + st + '</span>' +
+        '<button data-restart="' + esc(id) + '" title="Quit the persona screen; launchd relaunches it on its current harness (refused if the credential is dead)">restart</button>' +
+        '<select data-runas="' + esc(id) + '" title="Switch harness/model and restart"><option value="">run as…</option>' + opts + '</select>';
+    }
+    const personaStatusCache = {};
+    function renderPersonaStatus(id, r) {
+      let html;
+      if (!r) html = '<span class="dim">pending…</span>';
+      else if (r.action === 'check' && r.ok) {
+        const live = r.cred && r.cred.live;
+        html = '<span class="' + (live ? 'pst-ok' : 'pst-red') + '">' + esc(r.harness || '?') + ' ' + esc(r.model || '') + ' · cred ' + (live ? 'ok' : 'DEAD') + (r.cred && r.cred.expires_at ? ' (exp ' + esc(String(r.cred.expires_at).slice(11,16)) + 'Z)' : '') + '</span>';
+      } else if (r.ok) html = '<span class="pst-ok">' + esc(r.action) + ' ok → screen ' + esc(r.screen_pid || '?') + ' ' + esc(r.harness || '') + ' ' + esc(r.model || '') + '</span>';
+      else html = '<span class="pst-red">' + esc(r.action || '') + ' refused: ' + esc(r.reason || 'unknown') + '</span>';
+      personaStatusCache[id] = html;
+      document.querySelectorAll('[data-pstatus="' + id + '"]').forEach(el => { el.innerHTML = html; });
+    }
+    async function pollPersonaStatus(id, tries) {
+      for (let i = 0; i < (tries || 30); i++) {
+        try {
+          const res = await fetch('/agents/' + encodeURIComponent(id) + '/persona-status');
+          const j = await res.json();
+          if (j.result) { renderPersonaStatus(id, j.result); return j.result; }
+        } catch (e) { /* keep polling */ }
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      renderPersonaStatus(id, { ok: false, action: 'status', reason: 'no result within 90 s — is com.agiterra.persona-restart loaded?' });
+      return null;
+    }
+    async function personaAction(id, action, harness, model) {
+      if (action === 'restart' && !confirm('Restart ' + id + ' now? The screen is quit and launchd relaunches it on its current harness. Refused automatically if the credential is dead.')) return;
+      if (action === 'run-as' && !confirm('Switch ' + id + ' to ' + harness + ' ' + model + ' and restart it now?')) return;
+      renderPersonaStatus(id, null);
+      const res = await fetch('/agents/' + encodeURIComponent(id) + '/persona-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, harness, model }) });
+      const j = await res.json();
+      if (!j.ok) { renderPersonaStatus(id, { ok: false, action, reason: j.error || 'request refused' }); return; }
+      const r = await pollPersonaStatus(id, action === 'check' ? 10 : 40);
+      if (r && action !== 'check') {
+        const dock = document.getElementById('peek-dock');
+        if (dock) { const panel = document.createElement('div'); panel.className = 'peek-output'; panel.innerHTML = '<div class="peek-header">' + esc(id) + ' ' + esc(action) + '</div>' + esc(JSON.stringify(r, null, 2)); dock.prepend(panel); }
+      }
+    }
+    function bindPersonaControls(root) {
+      root.querySelectorAll('[data-restart]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); personaAction(el.dataset.restart, 'restart'); }; });
+      root.querySelectorAll('[data-runas]').forEach(el => { el.onchange = (e) => { e.stopPropagation(); const v = el.value; el.value = ''; if (!v) return; const [h, m] = v.split(' '); personaAction(el.dataset.runas, 'run-as', h, m); }; });
+    }
+    bindPersonaControls(document);
+    document.querySelectorAll('[data-pstatus]').forEach(el => { const id = el.dataset.pstatus; if (!personaStatusCache[id]) personaAction(id, 'check'); });
+
     // --- Token strip (GET /usage, polled every 60s; never invents a number) ---
     function relTime(iso) {
       if (!iso) return '';
@@ -544,6 +612,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
             '<button data-peek="' + esc(a.id) + '" title="Read agent screen output">peek</button>' +
             '<button data-msg="' + esc(a.id) + '" title="Send IPC message to agent">msg</button>' +
             '<a class="row-btn" href="' + esc(attachHref(a)) + '" title="Attach this agent\\'s screen in a new iTerm2 tab">📺 attach</a>' +
+            (a.permanent ? personaControlsJs(a.id) : '') +
           '</td>' +
           '</tr>' +
           '<tr><td colspan="7" class="agent-plan" data-plan-for="' + esc(a.id) + '">' + renderPlan(a.plan || '') + '</td></tr>';
@@ -559,6 +628,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       tbody.querySelectorAll('[data-msg]').forEach(el => {
         el.onclick = (e) => { e.stopPropagation(); promptSend(el.dataset.msg); };
       });
+      bindPersonaControls(tbody);
     };
 
     // --- Message log ---

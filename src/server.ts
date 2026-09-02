@@ -1495,6 +1495,53 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     }
   });
 
+  // --- Persona restart / run-as / credential check (2026-09-02, Tim: "restart button and
+  // choose harness/model dropdowns ... warning flags when we're out of tokens"). The gateway runs
+  // as tim with no sudo, so it only WRITES a request file; the root LaunchDaemon
+  // com.agiterra.persona-restart (persona-restart-watcher.sh) validates the persona, checks the
+  // credential for the target harness, and performs the restart; it writes <id>.result back.
+  const PERSONA_SPOOL = process.env.WIRE_PERSONA_SPOOL ?? "/tmp/agiterra-persona-restart";
+  const PERSONA_IDS = new Set((process.env.WIRE_PERSONA_IDS ?? "fondant,brioche,herald,vacherin").split(",").map((s) => s.trim()).filter(Boolean));
+  app.post("/agents/:id/persona-action", async (c) => {
+    const err = requireOperator(c);
+    if (err) return err;
+    const id = c.req.param("id");
+    if (!PERSONA_IDS.has(id)) return c.json({ error: `'${id}' is not a persona` }, 400);
+    let body: any = {};
+    try { body = await c.req.json(); } catch { body = {}; }
+    const action = String(body.action ?? "");
+    if (!["check", "restart", "run-as"].includes(action)) return c.json({ error: "action must be check|restart|run-as" }, 400);
+    const harness = String(body.harness ?? ""); const model = String(body.model ?? "");
+    if (action === "run-as" && (!/^(claude-code|grok|codex)$/.test(harness) || !/^[a-z0-9.-]+$/.test(model))) {
+      return c.json({ error: "run-as needs harness claude-code|grok|codex and a model matching ^[a-z0-9.-]+$" }, 400);
+    }
+    const by = getOperatorFromSession(c.req.header("cookie"), store)?.name ?? "operator";
+    try {
+      const { writeFileSync, renameSync, unlinkSync, existsSync } = await import("fs");
+      const tmp = `${PERSONA_SPOOL}/${id}.req.tmp`; const dst = `${PERSONA_SPOOL}/${id}.req`;
+      try { if (existsSync(`${PERSONA_SPOOL}/${id}.result`)) unlinkSync(`${PERSONA_SPOOL}/${id}.result`); } catch { /* stale result of another uid: watcher overwrites */ }
+      writeFileSync(tmp, JSON.stringify({ action, harness, model, by, requested_at: new Date().toISOString() }) + "\n");
+      renameSync(tmp, dst);
+      log.info({ event: "persona_action", id, action, harness, model, by }, "persona action queued");
+      return c.json({ ok: true, queued: true, id, action });
+    } catch (e: any) {
+      log.warn({ event: "persona_action_fail", id, action, err: String(e?.message ?? e) }, "persona action could not be queued");
+      return c.json({ ok: false, error: String(e?.message ?? e) }, 500);
+    }
+  });
+  app.get("/agents/:id/persona-status", async (c) => {
+    if (!isOperator(c)) return c.json({ error: "unauthorized" }, 401);
+    const id = c.req.param("id");
+    if (!PERSONA_IDS.has(id)) return c.json({ error: `'${id}' is not a persona` }, 400);
+    try {
+      const raw = readFileSync(`${PERSONA_SPOOL}/${id}.result`, "utf8");
+      return c.json({ ok: true, id, result: JSON.parse(raw) });
+    } catch {
+      const { existsSync } = await import("fs");
+      return c.json({ ok: true, id, result: null, pending: existsSync(`${PERSONA_SPOOL}/${id}.req`) });
+    }
+  });
+
   app.get("/messages/recent", (c) => {
     if (!isOperator(c)) {
       return c.json({ error: "unauthorized" }, 401);
