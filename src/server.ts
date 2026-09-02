@@ -1488,7 +1488,10 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       // host memory/swap/disk written every 60s by host-usage.sh (Tim 2026-09-01); absent => null
       let host: unknown = null;
       try { host = JSON.parse(readFileSync(process.env.WIRE_HOST_USAGE_FILE ?? "/tmp/host-usage.json", "utf8")); } catch { host = null; }
-      return c.json({ ok: true, file, file_mtime: new Date(mtime).toISOString(), data, host });
+      // shared testnet pool (dev-wallet USDC/ETH), written every 5 min by pool-usage.sh (2026-09-02)
+      let pool: unknown = null;
+      try { pool = JSON.parse(readFileSync(process.env.WIRE_POOL_USAGE_FILE ?? "/tmp/pool-usage.json", "utf8")); } catch { pool = null; }
+      return c.json({ ok: true, file, file_mtime: new Date(mtime).toISOString(), data, host, pool });
     } catch (e: any) {
       log.warn({ event: "usage_read_fail", file, err: String(e?.message ?? e) }, "usage file unreadable");
       return c.json({ ok: false, file, error: String(e?.message ?? e) }, 200);
