@@ -573,7 +573,7 @@ export function renderDashboard(agents: any[], operatorName: string): string {
               [['5h', fmt(p[0]), relTime((u.session || {}).resets_at)], ['7d', fmt(p[1]), relTime((u.weekly || {}).resets_at)], ['Fable', fmt(p[2]), relTime((u.fable || {}).resets_at)]],
               (sl.email || '') + (live ? ' · token ' + Math.round((sl.minutes_left || 0) / 60) + 'h left' : ' · ' + (u.status || 'no usage read')));
           }
-          const btns = acc.slots.map(sl => '<button class="row-btn" style="' + (sl.active ? 'font-weight:bold;opacity:.6' : '') + '" ' + (sl.active ? 'disabled' : '') + ' onclick="fleetAccount(\'' + esc(sl.slot) + '\')">' + esc(sl.slot) + '</button>').join(' ');
+          const btns = acc.slots.map(sl => '<button class="row-btn" data-slot="' + esc(sl.slot) + '" style="' + (sl.active ? 'font-weight:bold;opacity:.6' : '') + '" ' + (sl.active ? 'disabled' : '') + ' onclick="fleetAccount(this.dataset.slot)">' + esc(sl.slot) + '</button>').join(' ');
           claude += '<div class="usage-cell unknown"><div class="usage-label">Claude account</div><div class="usage-vals">' + btns + '</div>' +
             '<div class="usage-note"><span class="persona-status" data-pstatus="fleet">switch fans creds to every session + pokes parked ones</span></div></div>';
         } else {
