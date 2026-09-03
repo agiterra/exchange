@@ -598,14 +598,15 @@ export function renderDashboard(agents: any[], operatorName: string): string {
             (h.flags && h.flags.length) ? h.flags[0] : 'as of ' + String(h.as_of || '').slice(11, 16) + 'Z');
         }
         const pl = j.pool || null;
-        let poolCell = usageCell('USDC pool', 'unknown', [['USDC', '—', ''], ['ETH', '—', '']], 'no pool meter');
+        let poolCell = usageCell('Pool', 'unknown', [['USDC', '—', ''], ['ETH', '—', '']], 'no pool meter');
         if (pl && pl.status === 'live') {
           const low = (pl.usdc !== null && pl.usdc < pl.min_usdc) || (pl.eth !== null && pl.eth < pl.min_eth);
-          poolCell = usageCell('USDC pool', low ? 'red' : 'ok',
-            [['USDC', (pl.usdc === null ? '—' : Number(pl.usdc).toFixed(2)), 'min ' + pl.min_usdc], ['ETH', (pl.eth === null ? '—' : Number(pl.eth).toFixed(4)), 'min ' + pl.min_eth]],
+          poolCell = usageCell('Pool', low ? 'red' : 'ok',
+            [['USDC', (pl.usdc === null ? '—' : Number(pl.usdc).toFixed(2)), 'min ' + pl.min_usdc], ['ETH', (pl.eth === null ? '—' : Number(pl.eth).toFixed(4)), 'min ' + pl.min_eth],
+             ['props', ((pl.properties || {}).status === 'live' ? String((pl.properties || {}).count) : '?'), 'properties banked in the pool (' + ((pl.properties || {}).status || 'no ledger') + ')']],
             (pl.flags && pl.flags.length) ? pl.flags[0] : 'dev-wallet ' + String((pl.pool || {}).address || '').slice(0, 10) + '… as of ' + String(pl.as_of || '').slice(11, 16) + 'Z');
         } else if (pl) {
-          poolCell = usageCell('USDC pool', 'red', [['pool', 'unreadable', '']], pl.error || pl.status);
+          poolCell = usageCell('Pool', 'red', [['pool', 'unreadable', '']], pl.error || pl.status);
         }
         el.innerHTML = claude + grok + codex + hostCell + poolCell + '<div class="usage-cell unknown"><div class="usage-label">as of</div><div class="usage-vals">' + esc((d.as_of || '').replace('T', ' ').slice(0, 16)) + 'Z' + stale + '</div></div>';
       } catch (e) {
