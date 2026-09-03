@@ -495,6 +495,15 @@ export function renderDashboard(agents: any[], operatorName: string): string {
       renderPersonaStatus(id, { ok: false, action: 'status', reason: 'no result within 90 s — is com.agiterra.persona-restart loaded?' });
       return null;
     }
+    async function fleetAccount(slot) {
+      if (!confirm('Switch EVERY Claude session to account slot "' + slot + '"? Creds are fanned to all personas and lanes; parked sessions get a resume poke.')) return;
+      const el = document.querySelector('[data-pstatus="fleet"]'); if (el) el.textContent = 'switching → ' + slot + ' …';
+      const res = await fetch('/agents/fleet/persona-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'claude-account', slot }) });
+      const jr = await res.json().catch(() => ({}));
+      if (!res.ok || !jr.ok) { if (el) el.textContent = 'switch refused: ' + (jr.error || res.status); return; }
+      pollPersonaStatus('fleet', 30);
+      setTimeout(loadUsage, 8000);
+    }
     async function personaAction(id, action, harness, model) {
       if (action === 'restart' && !confirm('Restart ' + id + ' now? The screen is quit and launchd relaunches it on its current harness. Refused automatically if the credential is dead.')) return;
       if (action === 'run-as' && !confirm('Switch ' + id + ' to ' + harness + ' ' + model + ' and restart it now?')) return;
@@ -551,9 +560,27 @@ export function renderDashboard(agents: any[], operatorName: string): string {
         const cDead = d.claude_status && d.claude_status !== 'live';
         const cp = [pctNum(sd.used_percent), pctNum(fh.used_percent), pctNum(fw.used_percent)];
         const fmt = p => p === null ? '—' : p + '%';
-        const claude = usageCell('Claude', stateFor(cp, cDead),
-          [['7d', fmt(cp[0]), relTime(sd.resets_at)], ['5h', fmt(cp[1]), relTime(fh.resets_at)], ['Fable', fmt(cp[2]), relTime(fw.resets_at)]],
-          cDead ? 'credential/probe: ' + d.claude_status : relTime(fh.resets_at));
+        // One Claude cell per ACCOUNT SLOT (root's claude-account.sh publishes /tmp/claude-accounts.json;
+        // Tim 2026-09-03: both accounts' stats, labeled, and a switch). Falls back to the single legacy cell.
+        const acc = j.accounts && Array.isArray(j.accounts.slots) ? j.accounts : null;
+        let claude = '';
+        if (acc && acc.slots.length) {
+          for (const sl of acc.slots) {
+            const u = sl.usage || {}; const live = u.status === 'live';
+            const p = [pctNum((u.session || {}).used_percent), pctNum((u.weekly || {}).used_percent), pctNum((u.fable || {}).used_percent)];
+            const lbl = 'Claude · ' + sl.slot + (sl.active ? ' ✓' : '');
+            claude += usageCell(lbl, live ? stateFor(p, false) : 'unknown',
+              [['5h', fmt(p[0]), relTime((u.session || {}).resets_at)], ['7d', fmt(p[1]), relTime((u.weekly || {}).resets_at)], ['Fable', fmt(p[2]), relTime((u.fable || {}).resets_at)]],
+              (sl.email || '') + (live ? ' · token ' + Math.round((sl.minutes_left || 0) / 60) + 'h left' : ' · ' + (u.status || 'no usage read')));
+          }
+          const btns = acc.slots.map(sl => '<button class="row-btn" style="' + (sl.active ? 'font-weight:bold;opacity:.6' : '') + '" ' + (sl.active ? 'disabled' : '') + ' onclick="fleetAccount(\'' + esc(sl.slot) + '\')">' + esc(sl.slot) + '</button>').join(' ');
+          claude += '<div class="usage-cell unknown"><div class="usage-label">Claude account</div><div class="usage-vals">' + btns + '</div>' +
+            '<div class="usage-note"><span class="persona-status" data-pstatus="fleet">switch fans creds to every session + pokes parked ones</span></div></div>';
+        } else {
+          claude = usageCell('Claude', stateFor(cp, cDead),
+            [['7d', fmt(cp[0]), relTime(sd.resets_at)], ['5h', fmt(cp[1]), relTime(fh.resets_at)], ['Fable', fmt(cp[2]), relTime(fw.resets_at)]],
+            cDead ? 'credential/probe: ' + d.claude_status : relTime(fh.resets_at));
+        }
         const g = (d.grok || {}).weekly_page || {};
         const gp = pctNum(g.used_percent);
         const grok = usageCell('Grok', stateFor([gp], false), [['weekly', fmt(gp), relTime(g.resets_at)]],

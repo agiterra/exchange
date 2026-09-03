@@ -1491,7 +1491,11 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       // shared testnet pool (dev-wallet USDC/ETH), written every 5 min by pool-usage.sh (2026-09-02)
       let pool: unknown = null;
       try { pool = JSON.parse(readFileSync(process.env.WIRE_POOL_USAGE_FILE ?? "/tmp/pool-usage.json", "utf8")); } catch { pool = null; }
-      return c.json({ ok: true, file, file_mtime: new Date(mtime).toISOString(), data, host, pool });
+      // Claude account slots + per-slot usage, published by root's claude-account.sh (numbers only,
+      // never tokens); absent => null. Tim 2026-09-03: both accounts' stats, labeled; switch from here.
+      let accounts: unknown = null;
+      try { accounts = JSON.parse(readFileSync(process.env.WIRE_CLAUDE_ACCOUNTS_FILE ?? "/tmp/claude-accounts.json", "utf8")); } catch { accounts = null; }
+      return c.json({ accounts, ok: true, file, file_mtime: new Date(mtime).toISOString(), data, host, pool });
     } catch (e: any) {
       log.warn({ event: "usage_read_fail", file, err: String(e?.message ?? e) }, "usage file unreadable");
       return c.json({ ok: false, file, error: String(e?.message ?? e) }, 200);
@@ -1509,11 +1513,19 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     const err = requireOperator(c);
     if (err) return err;
     const id = c.req.param("id");
-    if (!PERSONA_IDS.has(id)) return c.json({ error: `'${id}' is not a persona` }, 400);
     let body: any = {};
     try { body = await c.req.json(); } catch { body = {}; }
     const action = String(body.action ?? "");
-    if (!["check", "restart", "run-as"].includes(action)) return c.json({ error: "action must be check|restart|run-as" }, 400);
+    // 2026-09-03 (Tim): id 'fleet' + action 'claude-account' + slot → switch every Claude session to a
+    // named account slot (root watcher runs claude-account.sh activate + poke; see /opt/agiterra/bin).
+    const slot = String(body.slot ?? "");
+    if (id === "fleet") {
+      if (action !== "claude-account") return c.json({ error: "fleet supports only action claude-account" }, 400);
+      if (!/^[a-z0-9-]+$/.test(slot)) return c.json({ error: "slot must match ^[a-z0-9-]+$" }, 400);
+    } else {
+      if (!PERSONA_IDS.has(id)) return c.json({ error: `'${id}' is not a persona` }, 400);
+      if (!["check", "restart", "run-as"].includes(action)) return c.json({ error: "action must be check|restart|run-as" }, 400);
+    }
     const harness = String(body.harness ?? ""); const model = String(body.model ?? "");
     if (action === "run-as" && (!/^(claude-code|grok|codex)$/.test(harness) || !/^[a-z0-9.-]+$/.test(model))) {
       return c.json({ error: "run-as needs harness claude-code|grok|codex and a model matching ^[a-z0-9.-]+$" }, 400);
@@ -1523,7 +1535,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       const { writeFileSync, renameSync, unlinkSync, existsSync } = await import("fs");
       const tmp = `${PERSONA_SPOOL}/${id}.req.tmp`; const dst = `${PERSONA_SPOOL}/${id}.req`;
       try { if (existsSync(`${PERSONA_SPOOL}/${id}.result`)) unlinkSync(`${PERSONA_SPOOL}/${id}.result`); } catch { /* stale result of another uid: watcher overwrites */ }
-      writeFileSync(tmp, JSON.stringify({ action, harness, model, by, requested_at: new Date().toISOString() }) + "\n");
+      writeFileSync(tmp, JSON.stringify({ action, harness, model, slot, by, requested_at: new Date().toISOString() }) + "\n");
       renameSync(tmp, dst);
       log.info({ event: "persona_action", id, action, harness, model, by }, "persona action queued");
       return c.json({ ok: true, queued: true, id, action });
@@ -1535,7 +1547,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
   app.get("/agents/:id/persona-status", async (c) => {
     if (!isOperator(c)) return c.json({ error: "unauthorized" }, 401);
     const id = c.req.param("id");
-    if (!PERSONA_IDS.has(id)) return c.json({ error: `'${id}' is not a persona` }, 400);
+    if (id !== "fleet" && !PERSONA_IDS.has(id)) return c.json({ error: `'${id}' is not a persona` }, 400);
     try {
       const raw = readFileSync(`${PERSONA_SPOOL}/${id}.result`, "utf8");
       return c.json({ ok: true, id, result: JSON.parse(raw) });
