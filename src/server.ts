@@ -1160,7 +1160,20 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
     // Build envelope and route. When the inbound matched a registered
     // webhook row, surface its id + name so receivers can self-cleanup
     // (e.g. github-claude-code unregistering on pull_request.closed).
+    // Explicit over implicit (Tim, 2026-09-04): a persona can hold apps in several Slack
+    // workspaces, so every Slack delivery names its org as the FIRST envelope key —
+    // never something the receiver infers from the URL or the webhook label. Source:
+    // the registration's meta.slack_org (+ team_id); fallback: the label + the event's team_id.
+    let orgBanner: Record<string, string> = {};
+    if (webhook && plugin === "slack") {
+      let meta: { slack_org?: string; team_id?: string } = {};
+      try { meta = webhook.meta ? JSON.parse(webhook.meta) : {}; } catch { /* unparseable meta = no banner source */ }
+      const teamId = meta.team_id ?? (parsedBody as { team_id?: string } | null)?.team_id ?? "";
+      const org = meta.slack_org ?? webhook.name;
+      orgBanner = { slack_org: `${org} (workspace ${webhook.name}${teamId ? `, team ${teamId}` : ""})` };
+    }
     const envelope = {
+      ...orgBanner,
       source,
       topic,
       dest: agentId,
