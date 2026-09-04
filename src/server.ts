@@ -161,6 +161,31 @@ export async function runCleanup(
   await fn(ctx.meta, ctx.secrets, fetch);
 }
 
+
+/** Trim a GitHub webhook body for delivery (see the webhook route). Pure; unknown shapes pass through. */
+export function slimGithubPayload(body: unknown): unknown {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const p = { ...(body as Record<string, unknown>) };
+  delete p.changes; delete p.organization; delete p.installation; delete p.enterprise;
+  const pick = (o: unknown, keys: string[]) => (o && typeof o === "object") ? Object.fromEntries(keys.filter((k) => k in (o as object)).map((k) => [k, (o as Record<string, unknown>)[k]])) : o;
+  if (p.repository) p.repository = pick(p.repository, ["id", "name", "full_name", "default_branch", "html_url", "private"]);
+  if (p.sender) p.sender = pick(p.sender, ["login", "type", "id"]);
+  const slimUser = (o: Record<string, unknown>) => { if (o.user) o.user = pick(o.user, ["login", "type", "id"]); if (o.author) o.author = pick(o.author, ["login", "type", "id"]); };
+  for (const k of ["issue", "pull_request", "comment", "review", "check_run", "workflow_run", "check_suite", "release", "discussion"]) {
+    const o = p[k];
+    if (!o || typeof o !== "object") continue;
+    const c = { ...(o as Record<string, unknown>) };
+    for (const junk of ["reactions", "_links", "performed_via_github_app", "repository", "head_repository", "app", "actor", "triggering_actor", "requested_teams", "milestone", "assignees", "assignee", "pull_requests", "output"]) delete c[junk];
+    slimUser(c);
+    if (c.head && typeof c.head === "object") c.head = pick(c.head, ["ref", "sha", "label"]);
+    if (c.base && typeof c.base === "object") c.base = pick(c.base, ["ref", "sha", "label"]);
+    if (Array.isArray(c.labels)) c.labels = (c.labels as Array<Record<string, unknown>>).map((l) => (l && typeof l === "object" ? l.name : l));
+    if (Array.isArray(c.requested_reviewers)) c.requested_reviewers = (c.requested_reviewers as Array<Record<string, unknown>>).map((u) => (u && typeof u === "object" ? u.login : u));
+    p[k] = c;
+  }
+  return p;
+}
+
 export function createServer({ port, store, router, emitter, log, heartbeats, onSessionEnd, serverPlugins = [], peekScreen = peekAgentScreen }: ServerDeps) {
   _serverLog = log;
   const serverPluginByAgentId = new Map(serverPlugins.map((p) => [p.agentId, p]));
@@ -1172,6 +1197,12 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       const org = meta.slack_org ?? webhook.name;
       orgBanner = { slack_org: `${org} (workspace ${webhook.name}${teamId ? `, team ${teamId}` : ""})` };
     }
+    // GitHub deliveries: trim what the AGENT receives (filters/dedup above already saw the full
+    // body). A raw issue_comment "edited" carries the PR body twice (`changes.body.from` + the
+    // comment) and the full repository/organization objects three times — 25–42 KB per delivery,
+    // measured 504 KB → 172 KB over 20 real events (cartellata, 2026-09-04). Filters keep working
+    // on the original; only the delivered copy is slimmed. Every kept key is one lanes read.
+    const deliveredPayload = plugin === "github" ? slimGithubPayload(parsedBody) : parsedBody;
     const envelope = {
       ...orgBanner,
       source,
@@ -1180,7 +1211,7 @@ export function createServer({ port, store, router, emitter, log, heartbeats, on
       plugin,
       ...(webhook ? { webhook_id: webhook.id, webhook_name: webhook.name } : {}),
       headers,
-      payload: parsedBody,
+      payload: deliveredPayload,
     };
 
     const dedupKey = (c as any).get("dedupKey") as string | undefined;
