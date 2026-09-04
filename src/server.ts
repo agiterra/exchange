@@ -181,6 +181,16 @@ export function slimGithubPayload(body: unknown): unknown {
     if (c.base && typeof c.base === "object") c.base = pick(c.base, ["ref", "sha", "label"]);
     if (Array.isArray(c.labels)) c.labels = (c.labels as Array<Record<string, unknown>>).map((l) => (l && typeof l === "object" ? l.name : l));
     if (Array.isArray(c.requested_reviewers)) c.requested_reviewers = (c.requested_reviewers as Array<Record<string, unknown>>).map((u) => (u && typeof u === "object" ? u.login : u));
+    // API scaffolding: a dozen *_url fields per object (html_url is the one a lane follows).
+    for (const key of Object.keys(c)) if (key.endsWith("_url") && key !== "html_url") delete c[key];
+    if (typeof c.url === "string") delete c.url;
+    // The PR/issue BODY rides on EVERY event about it (~10 KB each; 59 % of today's pull_request
+    // bytes, scalille ENG-3968) — a lane that wants it runs `gh pr view`. Cap it; keep the
+    // comment/review body itself (that is the signal). Drop diff hunks/patches likewise.
+    if ((k === "pull_request" || k === "issue") && typeof c.body === "string" && c.body.length > 400) {
+      c.body = c.body.slice(0, 400) + ` …[${c.body.length - 400} more chars trimmed by the Wire gateway — gh pr view ${c.number ?? ""} --json body for the full text]`;
+    }
+    for (const junk of ["diff_hunk", "patch"]) delete c[junk];
     p[k] = c;
   }
   return p;

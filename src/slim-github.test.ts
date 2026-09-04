@@ -16,4 +16,14 @@ describe("slimGithubPayload", () => {
     expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(body).length / 10);
     expect(slimGithubPayload("not json")).toBe("not json"); expect(slimGithubPayload(null)).toBe(null);
   });
+  test("pull_request body capped, diff hunks and *_url scaffolding dropped, comment body kept whole", () => {
+    const body = { action: "edited", pull_request: { number: 1847, body: "B".repeat(9000), title: "t", html_url: "h", url: "u", statuses_url: "s", comments_url: "c", head: { ref: "r", sha: "x", repo: {} }, base: { ref: "main", sha: "y" }, mergeable_state: "clean", draft: false },
+      comment: { id: 1, body: "review text ".repeat(50), diff_hunk: "@@ -1 +1 @@\n" + "d".repeat(3000), path: "a.ts", html_url: "h", url: "u", pull_request_url: "p" }, sender: { login: "coderabbitai[bot]", type: "Bot" } };
+    const out = slimGithubPayload(body) as any;
+    expect(out.pull_request.body.length).toBeLessThan(600); expect(out.pull_request.body).toContain("trimmed by the Wire gateway");
+    expect(out.pull_request.number).toBe(1847); expect(out.pull_request.head).toEqual({ ref: "r", sha: "x" }); expect(out.pull_request.mergeable_state).toBe("clean");
+    expect(out.pull_request.statuses_url).toBeUndefined(); expect(out.pull_request.url).toBeUndefined(); expect(out.pull_request.html_url).toBe("h");
+    expect(out.comment.body).toBe("review text ".repeat(50)); expect(out.comment.diff_hunk).toBeUndefined(); expect(out.comment.path).toBe("a.ts");
+    expect(JSON.stringify(out).length).toBeLessThan(JSON.stringify(body).length / 8);
+  });
 });
